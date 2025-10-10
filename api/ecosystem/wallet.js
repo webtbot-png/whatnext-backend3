@@ -4,6 +4,52 @@ const { getSupabaseAdminClient  } = require('../../database.js');
 const router = express.Router();
 
 /**
+ * Simple wallet balance fetcher using Solana RPC
+ */
+async function fetchWalletBalance(walletAddress) {
+  try {
+    console.log('🔍 Fetching balance for wallet:', walletAddress);
+    
+    // Simple RPC call to get wallet balance
+    const response = await fetch('https://api.mainnet-beta.solana.com', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getBalance',
+        params: [walletAddress]
+      })
+    });
+    
+    const data = await response.json();
+    
+    if (data.error) {
+      throw new Error(`Solana RPC error: ${data.error.message}`);
+    }
+    
+    const lamports = data.result?.value || 0;
+    const solBalance = lamports / 1000000000; // Convert lamports to SOL
+    
+    console.log('💰 Wallet balance:', solBalance, 'SOL');
+    
+    return {
+      address: walletAddress,
+      balance: solBalance,
+      balanceLamports: lamports
+    };
+  } catch (error) {
+    console.error('❌ Error fetching wallet balance:', error);
+    // Return default data on error
+    return {
+      address: walletAddress,
+      balance: 0,
+      balanceLamports: 0
+    };
+  }
+}
+
+/**
  * GET /api/ecosystem/wallet
  * Get wallet information and real-time balance
  */
