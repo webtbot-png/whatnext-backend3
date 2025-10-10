@@ -392,5 +392,119 @@ router.get('/locations', async (req, res) => {
   }
 });
 
+// DELETE /api/admin/ecosystem/spend/bulk - BULK DELETE FUNCTIONALITY
+router.delete('/spend/bulk', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    console.log('🗑️ Admin bulk delete ecosystem spending entries...');
+    
+    const { ids } = req.body;
+    
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid request: ids array is required and cannot be empty'
+      });
+    }
+
+    console.log(`🎯 Deleting ${ids.length} spending entries:`, ids);
+
+    const supabase = getSupabaseAdminClient();
+    
+    // Delete from spend_log table
+    const { data: deletedEntries, error: deleteError } = await supabase
+      .from('spend_log')
+      .delete()
+      .in('id', ids)
+      .select('id, description, amount_sol');
+
+    if (deleteError) {
+      console.error('❌ Database error during bulk delete:', deleteError);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to delete spending entries',
+        details: deleteError.message
+      });
+    }
+
+    const deletedCount = deletedEntries?.length || 0;
+    
+    console.log(`✅ Successfully deleted ${deletedCount} spending entries`);
+    
+    res.json({
+      success: true,
+      message: `Successfully deleted ${deletedCount} spending entries`,
+      deletedCount: deletedCount,
+      deletedIds: deletedEntries?.map(entry => entry.id) || []
+    });
+
+  } catch (error) {
+    console.error('❌ Bulk delete error:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error during bulk delete',
+      details: error.message
+    });
+  }
+});
+
+// DELETE /api/admin/ecosystem/spend/:id - SINGLE DELETE FUNCTIONALITY
+router.delete('/spend/:id', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { id } = req.params;
+    
+    console.log(`🗑️ Admin deleting single ecosystem spending entry: ${id}`);
+
+    const supabase = getSupabaseAdminClient();
+    
+    // Delete the single spending entry
+    const { data: deletedEntry, error: deleteError } = await supabase
+      .from('spend_log')
+      .delete()
+      .eq('id', id)
+      .select('id, description, amount_sol')
+      .single();
+
+    if (deleteError) {
+      if (deleteError.code === 'PGRST116') {
+        return res.status(404).json({
+          success: false,
+          error: 'Spending entry not found'
+        });
+      }
+      
+      console.error('❌ Database error during single delete:', deleteError);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to delete spending entry',
+        details: deleteError.message
+      });
+    }
+
+    console.log(`✅ Successfully deleted single spending entry: ${deletedEntry.description}`);
+    
+    res.json({
+      success: true,
+      message: 'Successfully deleted spending entry',
+      deletedEntry: deletedEntry
+    });
+
+  } catch (error) {
+    console.error('❌ Single delete error:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error during single delete',
+      details: error.message
+    });
+  }
+});
+
 module.exports = router;
 
