@@ -14,8 +14,7 @@ router.use('/pumpfun-fees', pumpfunFeesRouter);
 router.use('/wallet', walletRouter);
 router.use('/data', dataRouter);
 
-// TEMPORARY ADMIN ROUTE COMPATIBILITY (until server restart)
-// This allows admin dashboard to work by proxying to existing endpoints
-router.use('/admin/spend', spendRouter); // Proxy /api/ecosystem/admin/spend to /api/ecosystem/spend
+// ❌ REMOVED: Problematic admin proxy causing infinite request loops
+// router.use('/admin/spend', spendRouter);
 
 module.exports = router;
