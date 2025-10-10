@@ -1,0 +1,421 @@
+const express = require('express');
+const { getSupabaseAdminClient  } = require('../../database.js');
+const puppeteer = require('puppeteer');
+const router = express.Router();
+
+// Helper function to replace deprecated waitForTimeout
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function extractTweetId(url) {
+  const patterns = [
+    /twitter\.com\/\w+\/status\/(\d+)/,
+    /x\.com\/\w+\/status\/(\d+)/
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(url);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function extractUsername(url) {
+  const patterns = [
+    /twitter\.com\/(\w+)\/status/,
+    /x\.com\/(\w+)\/status/
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(url);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+router.get('/', async (req, res) => {
+  try {
+    const featured = req.query.featured === 'true';
+    const limit = parseInt(req.query.limit) || 50;
+    const adminView = req.headers.authorization?.includes('Bearer');
+    const supabase = getSupabaseAdminClient();
+    let query = supabase
+      .from('community_tweets')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (!adminView) {
+      query = query.eq('is_active', true);
+    }
+    if (featured) {
+      query = query.eq('is_featured', true);
+    }
+    query = query.limit(limit);
+    const { data: tweets, error } = await query;
+    if (error) {
+      console.error('Failed to fetch community tweets:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to fetch tweets',
+        tweets: []
+      });
+    }
+    return res.json({
+      success: true,
+      tweets: tweets || []
+    });
+  } catch (error) {
+    console.error('Community tweets API error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch tweets',
+      tweets: []
+    });
+  }
+});
+
+/**
+ * Get Puppeteer browser options
+ */
+function getPuppeteerOptions() {
+  const options = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu'
+    ]
+  };
+  
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    options.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    console.log('Using system Chromium:', process.env.PUPPETEER_EXECUTABLE_PATH);
+  }
+  
+  return options;
+}
+
+/**
+ * Navigate to tweet URL with retry logic
+ */
+async function navigateToTweet(page, tweetUrl) {
+  console.log('📡 Navigating to tweet...');
+  
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      if (attempt > 1) {
+        console.log(`🔄 Retry attempt ${attempt}/3...`);
+        await sleep(attempt * 1000);
+      }
+      
+      await page.goto(tweetUrl, { 
+        waitUntil: 'domcontentloaded',
+        timeout: 30000 
+      });
+      
+      await sleep(3000);
+      await page.waitForSelector('article', { timeout: 15000 });
+      
+      console.log('✅ Navigation successful');
+      return;
+      
+    } catch (navError) {
+      console.error(`❌ Navigation error (attempt ${attempt}/3):`, navError.message);
+      
+      if (attempt === 3) {
+        throw new Error(`Failed to navigate after 3 attempts: ${navError.message}`);
+      }
+    }
+  }
+}
+
+/**
+ * Extract tweet content from page
+ */
+function extractTweetContent() {
+  // Strategy 1: Find tweet text using data-testid (preserves original formatting)
+  const tweetTextDiv = document.querySelector('[data-testid="tweetText"]');
+  if (tweetTextDiv) {
+    // Use innerText to preserve line breaks exactly as they appear on Twitter
+    const content = tweetTextDiv.innerText;
+    if (content && content.trim()) {
+      return { 
+        success: true, 
+        content: content.trim(),
+        method: 'data-testid'
+      };
+    }
+  }
+  
+  // Strategy 2: Find tweet within article using lang spans
+  const article = document.querySelector('article');
+  if (article) {
+    const textSpans = article.querySelectorAll('[lang] span');
+    const texts = Array.from(textSpans)
+      .map(span => span.textContent?.trim())
+      .filter(text => text && text.length > 10 && !text.startsWith('@') && !text.startsWith('#'));
+    
+    if (texts.length > 0) {
+      return {
+        success: true,
+        content: texts[0],
+        method: 'article spans'
+      };
+    }
+  }
+  
+  // Strategy 3: Meta tags fallback
+  const ogDesc = document.querySelector('meta[property="og:description"]');
+  if (ogDesc) {
+    const content = ogDesc.getAttribute('content');
+    if (content && content.length > 10) {
+      return {
+        success: true,
+        content: content.trim(),
+        method: 'meta tag'
+      };
+    }
+  }
+  
+  return { success: false, error: 'Could not extract tweet content' };
+}
+
+/**
+ * Clean up browser resources
+ */
+async function cleanupBrowser(page, browser) {
+  try {
+    if (page && !page.isClosed()) {
+      await page.close();
+    }
+  } catch (cleanupError) {
+    console.warn('⚠️ Error closing page:', cleanupError.message);
+  }
+  
+  if (browser) {
+    try {
+      await browser.close();
+    } catch (cleanupError) {
+      console.warn('⚠️ Error closing browser:', cleanupError.message);
+    }
+  }
+}
+
+/**
+ * Scrape tweet content using Puppeteer (headless browser)
+ * This is the ONLY reliable method that works for ANY public tweet
+ */
+async function scrapeTweetWithPuppeteer(tweetUrl) {
+  console.log(`🤖 Launching Puppeteer to scrape: ${tweetUrl}`);
+  
+  let browser;
+  let page;
+  
+  try {
+    browser = await puppeteer.launch(getPuppeteerOptions());
+    page = await browser.newPage();
+    
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1920, height: 1080 });
+    
+    await navigateToTweet(page, tweetUrl);
+    
+    console.log('🔍 Extracting tweet content...');
+    const result = await page.evaluate(extractTweetContent);
+    
+    await cleanupBrowser(page, browser);
+    
+    if (result.success && result.content) {
+      console.log(`✅ Successfully scraped tweet (${result.content.length} chars) using ${result.method}`);
+      return { content: result.content, error: '' };
+    } else {
+      console.error('❌ Failed to extract tweet content:', result.error);
+      return { content: '', error: result.error || 'Scraping failed' };
+    }
+    
+  } catch (error) {
+    await cleanupBrowser(page, browser);
+    console.error('❌ Puppeteer scraping error:', error.message);
+    return { content: '', error: `Scraping failed: ${error.message}` };
+  }
+}
+
+/**
+ * Fetch tweet content - uses Puppeteer scraping ONLY
+ */
+async function fetchTweetContent(tweetId, tweet_url) {
+  console.log(`🔍 Fetching tweet content for ID: ${tweetId}`);
+  
+  // Use Puppeteer to scrape the tweet
+  const result = await scrapeTweetWithPuppeteer(tweet_url);
+  
+  return result;
+}
+
+router.post('/', async (req, res) => {
+  try {
+    const { tweet_url, manual_content } = req.body;
+    if (!tweet_url) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tweet URL is required'
+      });
+    }
+    if (!tweet_url.includes('twitter.com') && !tweet_url.includes('x.com')) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please provide a valid Twitter/X URL'
+      });
+    }
+    const tweetId = extractTweetId(tweet_url);
+    const username = extractUsername(tweet_url);
+    if (!tweetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Could not extract tweet ID from URL'
+      });
+    }
+    const supabase = getSupabaseAdminClient();
+    const { data: existing } = await supabase
+      .from('community_tweets')
+      .select('id')
+      .eq('tweet_id', tweetId)
+      .single();
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        error: 'This tweet has already been added'
+      });
+    }
+    const result = await fetchTweetContent(tweetId, tweet_url);
+    let tweetContent = result.content;
+    let tweetContentError = result.error;
+    
+    // If API failed and manual content is provided, use it
+    if (!tweetContent && manual_content && typeof manual_content === 'string' && manual_content.trim().length > 0) {
+      tweetContent = manual_content.trim();
+      tweetContentError = 'Used manual content';
+      console.log('📝 Using manual content as fallback');
+    }
+    
+    // If still no content, return error
+    if (!tweetContent) {
+      console.error('❌ No tweet content available:', tweetContentError);
+      return res.status(422).json({
+        success: false,
+        error: tweetContentError || 'Could not fetch tweet content. Please provide content manually.',
+        details: tweetContentError
+      });
+    }
+    
+    console.log('💾 Inserting tweet into database...');
+    const { data: tweet, error } = await supabase
+      .from('community_tweets')
+      .insert({
+        tweet_id: tweetId,
+        tweet_url: tweet_url,
+        author_username: username || 'unknown',
+        title: `Tweet by @${username || 'unknown'}`,
+        description: 'Community tweet',
+        content: tweetContent,
+        is_featured: false,
+        is_active: true,
+        engagement_score: 0
+      })
+      .select()
+      .single();
+    if (error) {
+      console.error('❌ Failed to add tweet to database:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to add tweet'
+      });
+    }
+    
+    console.log('✅ Tweet added successfully:', tweet.id);
+    
+    return res.json({
+      success: true,
+      tweet,
+      message: tweetContentError ? `Tweet added (${tweetContentError})` : 'Tweet added successfully'
+    });
+  } catch (error) {
+    console.error('Add tweet error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to add tweet'
+    });
+  }
+});
+
+router.patch('/', async (req, res) => {
+  try {
+    const { id, is_featured, is_active } = req.body;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tweet ID is required'
+      });
+    }
+    const supabase = getSupabaseAdminClient();
+    const updates = {};
+    if (typeof is_featured === 'boolean') updates.is_featured = is_featured;
+    if (typeof is_active === 'boolean') updates.is_active = is_active;
+    updates.updated_at = new Date().toISOString();
+    const { error } = await supabase
+      .from('community_tweets')
+      .update(updates)
+      .eq('id', id);
+    if (error) {
+      console.error('Failed to update tweet:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update tweet'
+      });
+    }
+    return res.json({
+      success: true,
+      message: 'Tweet updated successfully'
+    });
+  } catch (error) {
+    console.error('Update tweet error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to update tweet'
+    });
+  }
+});
+
+router.delete('/', async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tweet ID is required'
+      });
+    }
+    const supabase = getSupabaseAdminClient();
+    const { error } = await supabase
+      .from('community_tweets')
+      .delete()
+      .eq('id', id);
+    if (error) {
+      console.error('Failed to delete tweet:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to delete tweet'
+      });
+    }
+    return res.json({
+      success: true,
+      message: 'Tweet removed successfully'
+    });
+  } catch (error) {
+    console.error('Delete tweet error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to delete tweet'
+    });
+  }
+});
+
+module.exports = router;
+

@@ -1,0 +1,246 @@
+const express = require('express');
+const { getSupabaseAdminClient  } = require('../../database.js');
+const jwt = require('jsonwebtoken');
+
+const router = express.Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
+
+function verifyAdminToken(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new Error('Unauthorized');
+  }
+  const token = authHeader.substring(7);
+  jwt.verify(token, JWT_SECRET);
+}
+
+// GET /api/admin/content
+router.get('/', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const supabase = getSupabaseAdminClient();
+    const { data: contentEntries, error } = await supabase
+      .from('content_entries')
+      .select(`
+        id,
+        title,
+        description,
+        content_type,
+        media_type,
+        media_url,
+        thumbnail_url,
+        duration,
+        location_id,
+        custom_location,
+        event_date,
+        event_time,
+        start_time,
+        end_time,
+        timezone,
+        status,
+        visibility,
+        view_count,
+        like_count,
+        is_featured,
+        is_pinned,
+        tags,
+        category,
+        published_at,
+        created_at,
+        updated_at,
+        locations (
+          name,
+          country_iso3,
+          country,
+          status
+        )
+      `)
+      .order('created_at', { ascending: false });
+    if (error) {
+      console.error('Error fetching content entries:', error);
+      throw error;
+    }
+    const processedContent = (contentEntries || []).map(entry => ({
+      ...entry,
+      location_name: entry.locations?.name || entry.custom_location || 'No location',
+      display_status: entry.status.charAt(0).toUpperCase() + entry.status.slice(1),
+      is_scheduled: entry.status === 'upcoming' && (entry.event_date || entry.start_time),
+      is_live: entry.status === 'live',
+      total_engagement: (entry.view_count || 0) + (entry.like_count || 0)
+    }));
+    return res.json({
+      success: true,
+      content: processedContent,
+      entries: processedContent,
+      total: processedContent.length,
+      summary: {
+        total: processedContent.length,
+        byStatus: processedContent.reduce((acc, item) => {
+          acc[item.status] = (acc[item.status] || 0) + 1;
+          return acc;
+        }, {}),
+        byType: processedContent.reduce((acc, item) => {
+          acc[item.content_type] = (acc[item.content_type] || 0) + 1;
+          return acc;
+        }, {}),
+        featured: processedContent.filter(item => item.is_featured).length,
+        scheduled: processedContent.filter(item => item.is_scheduled).length
+      },
+      message: contentEntries?.length ? `Found ${contentEntries.length} content entries` : 'No content entries found'
+    });
+  } catch (error) {
+    console.error('Error getting content:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(500).json({ success: false, error: 'Failed to fetch content entries' });
+  }
+});
+
+function validateContentData(data) {
+  if (!data.title || !data.content_type) {
+    return { valid: false, error: 'Title and content type are required' };
+  }
+  return { valid: true };
+}
+
+function prepareContentEntry(data) {
+  // Base entry with only required and non-scheduling fields
+  const entry = {
+    title: data.title,
+    description: data.description || null,
+    content_type: data.content_type,
+    media_type: data.media_type || 'youtube',
+    media_url: data.media_url || null,
+    thumbnail_url: data.thumbnail_url || null,
+    duration: data.duration || null,
+    location_id: data.location_id || null,
+    custom_location: data.custom_location || null,
+    timezone: data.timezone || 'UTC',
+    status: data.status || 'draft',
+    visibility: data.visibility || 'public',
+    tags: data.tags || [],
+    category: data.category || null,
+    is_featured: data.is_featured || false,
+    is_pinned: data.is_pinned || false,
+    view_count: 0,
+    like_count: 0,
+    metadata: data.metadata || {},
+    processing_status: data.processing_status || 'ready'
+  };
+
+  // Set published_at for published status
+  if (data.status === 'published') {
+    entry.published_at = new Date().toISOString();
+  }
+
+  // CRITICAL: Only add scheduling fields for statuses that require them
+  // According to your constraint, scheduling fields should ONLY be present
+  // when status is 'upcoming', 'live', or 'past'
+  const schedulingStatuses = ['upcoming', 'live', 'past'];
+  if (schedulingStatuses.includes(entry.status)) {
+    if (data.event_date) entry.event_date = data.event_date;
+    if (data.event_time) entry.event_time = data.event_time;
+    if (data.start_time) entry.start_time = data.start_time;
+    if (data.end_time) entry.end_time = data.end_time;
+  }
+  // For non-scheduling statuses, DO NOT include scheduling fields at all
+  // (They must be completely omitted, not set to null)
+
+  console.log('📝 Prepared content entry:', {
+    status: entry.status,
+    hasSchedulingFields: schedulingStatuses.includes(entry.status),
+    fields: Object.keys(entry),
+    schedulingFieldsIncluded: {
+      event_date: 'event_date' in entry,
+      event_time: 'event_time' in entry,
+      start_time: 'start_time' in entry,
+      end_time: 'end_time' in entry
+    }
+  });
+
+  return entry;
+}
+
+function handleError(error, req, res) {
+  console.error('❌ Error creating content entry:', error);
+  console.error('📋 Request body was:', req.body);
+  console.error('🔍 Full error details:', {
+    message: error instanceof Error ? error.message : 'Unknown error',
+    stack: error instanceof Error ? error.stack : 'No stack trace',
+    code: error?.code,
+    details: error?.details,
+    hint: error?.hint
+  });
+  if (error instanceof Error && error.message === 'Unauthorized') {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  // Provide more specific error message for constraint violations
+  let errorMessage = 'Failed to create content entry';
+  if (error?.code === '23514') {
+    errorMessage = 'Database constraint violation. Check scheduling fields match status.';
+  }
+  return res.status(500).json({ 
+    success: false, 
+    error: errorMessage,
+    details: error instanceof Error ? error.message : 'Unknown error',
+    code: error?.code,
+    hint: error?.hint
+  });
+}
+
+// POST /api/admin/content
+router.post('/', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    console.log('📥 Received content creation request:', {
+      status: req.body.status,
+      media_type: req.body.media_type,
+      hasEventDate: !!req.body.event_date,
+      hasEventTime: !!req.body.event_time
+    });
+    const validation = validateContentData(req.body);
+    if (!validation.valid) {
+      return res.status(400).json({ success: false, error: validation.error });
+    }
+    const contentData = prepareContentEntry(req.body);
+    console.log('💾 Inserting content entry with fields:', Object.keys(contentData));
+    const supabase = getSupabaseAdminClient();
+    const { data: contentEntry, error } = await supabase
+      .from('content_entries')
+      .insert(contentData)
+      .select()
+      .single();
+    if (error) {
+      console.error('❌ Supabase insert error:', error);
+      throw error;
+    }
+    console.log('✅ Content entry created successfully:', contentEntry.id);
+    return res.status(201).json({ success: true, entry: contentEntry });
+  } catch (error) {
+    return handleError(error, req, res);
+  }
+});
+
+// DELETE /api/admin/content/:id
+router.delete('/:id', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ success: false, error: 'Missing content ID' });
+    }
+    const supabase = getSupabaseAdminClient();
+    const { error } = await supabase
+      .from('content_entries')
+      .delete()
+      .eq('id', id);
+    if (error) throw error;
+    return res.json({ success: true, message: `Content entry ${id} deleted` });
+  } catch (error) {
+    return handleError(error, req, res);
+  }
+});
+
+module.exports = router;
+
