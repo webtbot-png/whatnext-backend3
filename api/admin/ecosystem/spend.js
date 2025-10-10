@@ -4,7 +4,7 @@ const router = express.Router();
 /**
  * GET /api/admin/ecosystem/spend
  * Get ecosystem spending data for admin dashboard - REDIRECTS TO UNIFIED API
- * This ensures both admin panel and public ecosystem page show the same data
+ * This ensures both admin panel and public ecosystem page show the same data 
  */
 router.get('/', async (req, res) => {
   try {
