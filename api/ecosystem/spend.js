@@ -203,7 +203,10 @@ router.delete('/:id', async (req, res) => {
       .eq('id', id)
       .select();
 
-    if (spendError && !spendError.message.includes('PGRST116')) {
+    // Handle database table not existing
+    if (spendError && (spendError.message.includes('PGRST205') || spendError.message.includes('relation') || spendError.message.includes('does not exist'))) {
+      console.log('⚠️ spend_log table does not exist, skipping...');
+    } else if (spendError && !spendError.message.includes('PGRST116')) {
       console.error('❌ Error deleting from spend_log:', spendError);
       return res.status(500).json({
         success: false,
@@ -220,7 +223,10 @@ router.delete('/:id', async (req, res) => {
         .eq('id', id)
         .select();
 
-      if (payoutError && !payoutError.message.includes('PGRST116')) {
+      // Handle database table not existing
+      if (payoutError && (payoutError.message.includes('PGRST205') || payoutError.message.includes('relation') || payoutError.message.includes('does not exist'))) {
+        console.log('⚠️ giveaway_payouts table does not exist, skipping...');
+      } else if (payoutError && !payoutError.message.includes('PGRST116')) {
         console.error('❌ Error deleting from giveaway_payouts:', payoutError);
         return res.status(500).json({
           success: false,
@@ -238,7 +244,16 @@ router.delete('/:id', async (req, res) => {
           .eq('id', actualId)
           .select();
 
-        if (claimError && !claimError.message.includes('PGRST116')) {
+        // Handle database table not existing
+        if (claimError && (claimError.message.includes('PGRST205') || claimError.message.includes('relation') || claimError.message.includes('does not exist'))) {
+          console.log('⚠️ claim_links table does not exist, skipping...');
+          // All tables checked, return not found
+          return res.status(404).json({
+            success: false,
+            error: 'Entry not found',
+            message: `No spending entry found with ID: ${id} (database tables not configured)`
+          });
+        } else if (claimError && !claimError.message.includes('PGRST116')) {
           console.error('❌ Error deleting from claim_links:', claimError);
           return res.status(500).json({
             success: false,
@@ -312,6 +327,8 @@ router.delete('/bulk', async (req, res) => {
 
     for (const id of ids) {
       try {
+        let foundEntry = false;
+
         // Try spend_log first
         const { data: deletedSpend, error: spendError } = await supabase
           .from('spend_log')
@@ -319,38 +336,50 @@ router.delete('/bulk', async (req, res) => {
           .eq('id', id)
           .select();
 
-        if (!spendError && deletedSpend && deletedSpend.length > 0) {
+        if (spendError && (spendError.message.includes('PGRST205') || spendError.message.includes('relation') || spendError.message.includes('does not exist'))) {
+          console.log('⚠️ spend_log table does not exist, skipping...');
+        } else if (!spendError && deletedSpend && deletedSpend.length > 0) {
           deletedEntries.push({ id, type: 'spend_log', data: deletedSpend[0] });
-          continue;
+          foundEntry = true;
         }
 
-        // Try giveaway_payouts
-        const { data: deletedPayout, error: payoutError } = await supabase
-          .from('giveaway_payouts')
-          .delete()
-          .eq('id', id)
-          .select();
+        if (!foundEntry) {
+          // Try giveaway_payouts
+          const { data: deletedPayout, error: payoutError } = await supabase
+            .from('giveaway_payouts')
+            .delete()
+            .eq('id', id)
+            .select();
 
-        if (!payoutError && deletedPayout && deletedPayout.length > 0) {
-          deletedEntries.push({ id, type: 'giveaway_payouts', data: deletedPayout[0] });
-          continue;
+          if (payoutError && (payoutError.message.includes('PGRST205') || payoutError.message.includes('relation') || payoutError.message.includes('does not exist'))) {
+            console.log('⚠️ giveaway_payouts table does not exist, skipping...');
+          } else if (!payoutError && deletedPayout && deletedPayout.length > 0) {
+            deletedEntries.push({ id, type: 'giveaway_payouts', data: deletedPayout[0] });
+            foundEntry = true;
+          }
         }
 
-        // Try claim_links
-        const actualId = id.startsWith('claim_') ? id.replace('claim_', '') : id;
-        const { data: deletedClaim, error: claimError } = await supabase
-          .from('claim_links')
-          .delete()
-          .eq('id', actualId)
-          .select();
+        if (!foundEntry) {
+          // Try claim_links
+          const actualId = id.startsWith('claim_') ? id.replace('claim_', '') : id;
+          const { data: deletedClaim, error: claimError } = await supabase
+            .from('claim_links')
+            .delete()
+            .eq('id', actualId)
+            .select();
 
-        if (!claimError && deletedClaim && deletedClaim.length > 0) {
-          deletedEntries.push({ id, type: 'claim_links', data: deletedClaim[0] });
-          continue;
+          if (claimError && (claimError.message.includes('PGRST205') || claimError.message.includes('relation') || claimError.message.includes('does not exist'))) {
+            console.log('⚠️ claim_links table does not exist, skipping...');
+          } else if (!claimError && deletedClaim && deletedClaim.length > 0) {
+            deletedEntries.push({ id, type: 'claim_links', data: deletedClaim[0] });
+            foundEntry = true;
+          }
         }
 
-        // If we get here, the entry wasn't found
-        failedDeletions.push({ id, reason: 'Entry not found' });
+        // If we get here, the entry wasn't found in any table
+        if (!foundEntry) {
+          failedDeletions.push({ id, reason: 'Entry not found (database tables not configured)' });
+        }
 
       } catch (entryError) {
         console.error(`❌ Error deleting entry ${id}:`, entryError);
