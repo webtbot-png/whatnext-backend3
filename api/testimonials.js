@@ -1,5 +1,5 @@
 const express = require('express');
-const { getSupabaseAdminClient } = require('../database.cjs');
+const { getSupabaseAdminClient } = require('../database.js');
 
 const router = express.Router();
 
@@ -103,3 +103,4 @@ router.post('/', async (req, res) => {
 });
 
 module.exports = router;
+
