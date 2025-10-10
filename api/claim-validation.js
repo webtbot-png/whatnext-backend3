@@ -1,11 +1,16 @@
 const express = require('express');
-const { getSupabaseAdminClient  } = require('../database.js');
+const { getSupabaseAdminClient } = require('../database.js');
 const router = express.Router();
 
+/**
+ * POST /api/claim-validation
+ * Validate and process claim codes
+ */
 router.post('/', async (req, res) => {
   try {
     const { code, email, claimCode } = req.body;
     const actualCode = code || claimCode;
+    
     if (!actualCode) {
       return res.json({
         success: true,
@@ -15,6 +20,7 @@ router.post('/', async (req, res) => {
         example: 'POST with {"code": "YOUR_CLAIM_CODE"}'
       });
     }
+    
     const supabase = getSupabaseAdminClient();
     const { data: claim, error } = await supabase
       .from('claim_links')
@@ -22,12 +28,14 @@ router.post('/', async (req, res) => {
       .eq('code', actualCode.toUpperCase())
       .is('claimed_at', null)
       .single();
+    
     if (error || !claim) {
       return res.status(404).json({
         success: false,
         error: 'Invalid or already claimed code'
       });
     }
+    
     const isExpired = new Date() > new Date(claim.expires_at);
     if (isExpired) {
       return res.status(400).json({
@@ -36,6 +44,7 @@ router.post('/', async (req, res) => {
         expires_at: claim.expires_at
       });
     }
+    
     const { data: updatedClaim, error: updateError } = await supabase
       .from('claim_links')
       .update({
@@ -45,10 +54,13 @@ router.post('/', async (req, res) => {
       .eq('id', claim.id)
       .select()
       .single();
+    
     if (updateError) {
       throw updateError;
     }
+    
     const solAmount = claim.amount_lamports ? (claim.amount_lamports / 1000000000) : 0;
+    
     res.json({
       success: true,
       claim: {
