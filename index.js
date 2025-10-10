@@ -13,9 +13,7 @@ app.use(cors({
   origin: [
     'http://localhost:3000',
     'http://localhost:5173',
-    'https://whatnexttoken.com',
-    'https://www.whatnexttoken.com',
-    'https://www.whatnext.fun'
+    'https://whatnext.fun'
   ],
   credentials: true
 }));
