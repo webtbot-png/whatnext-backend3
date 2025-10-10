@@ -135,12 +135,11 @@ const mountRoutes = () => {
       // Other specific routes
       { path: '/api/bunny-net', file: './api/bunny-net/bunny.js' },
       { path: '/api/claim/validate', file: './api/claim/validate.js' },
-      // ❌ REMOVED: Individual ecosystem routes (using modular router instead)
-      // { path: '/api/ecosystem/data', file: './api/ecosystem/data.js' },
-      // { path: '/api/ecosystem/fees', file: './api/ecosystem/fees.js' },
-      // { path: '/api/ecosystem/pumpfun-fees', file: './api/ecosystem/pumpfun-fees.js' },
-      // { path: '/api/ecosystem/spend', file: './api/ecosystem/spend.js' },
-      // { path: '/api/ecosystem/wallet', file: './api/ecosystem/wallet.js' },
+      { path: '/api/ecosystem/data', file: './api/ecosystem/data.js' },
+      { path: '/api/ecosystem/fees', file: './api/ecosystem/fees.js' },
+      { path: '/api/ecosystem/pumpfun-fees', file: './api/ecosystem/pumpfun-fees.js' },
+      { path: '/api/ecosystem/spend', file: './api/ecosystem/spend.js' },
+      { path: '/api/ecosystem/wallet', file: './api/ecosystem/wallet.js' },
       { path: '/api/giveaway/winners', file: './api/giveaway/winners.js' },
       { path: '/api/media/track-view', file: './api/media/track-view.js' },
       { path: '/api/pumpfun/data', file: './api/pumpfun/data.js' },
