@@ -15,11 +15,8 @@ app.use(cors({
     'http://localhost:5173',
     'https://whatnexttoken.com',
     'https://www.whatnexttoken.com',
-    'https://www.whatnext.fun',
-    /\.hostinger\./,
-    /\.000webhostapp\./,
-    /\.hostinger\.com$/,
-    /\.000webhost\.app$/
+    'https://whatnext.fun',      // WITHOUT www
+    'https://www.whatnext.fun'   // WITH www
   ],
   credentials: true
 }));
@@ -91,6 +88,7 @@ const mountRoutes = () => {
       { path: '/api/admin', file: './api/admin/index.js' },
       { path: '/api/analytics', file: './api/analytics/index.js' },
       { path: '/api/ecosystem', file: './api/ecosystem/index.js' },
+      { path: '/api/admin/ecosystem/spend', file: './api/admin/ecosystem/spend.js' },
       { path: '/api/pumpfun', file: './api/pumpfun/index.js' },
       { path: '/api/settings', file: './api/settings/index.js' },
       { path: '/api/social', file: './api/social/index.js' },
