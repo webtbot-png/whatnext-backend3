@@ -1,5 +1,5 @@
-import express from 'express';
-import cors from 'cors';
+const express = require('express');
+const cors = require('cors');
 
 // Create Express app
 const app = express();
@@ -82,4 +82,4 @@ app.use('*', (req, res) => {
   });
 });
 
-export default app;
+module.exports = app;
