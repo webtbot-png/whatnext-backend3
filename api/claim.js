@@ -175,7 +175,7 @@ async function generateSingleQR(supabase, id) {
     console.log('❌ Claim not found:', error?.message);
     throw new Error(`Claim not found: ${error?.message}`);
   }
-  const claimUrl = `${process.env.FRONTEND_URL || 'https://web-production-061ff.up.railway.app'}/claim/${claim.code}`;
+  const claimUrl = `${process.env.FRONTEND_URL || 'https://whatnext-backend3-production.up.railway.app'}/claim/${claim.code}`;
   const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
   return { qrBuffer, qr: qrBuffer.toString('base64'), url: claimUrl, claim: { ...claim, amount_sol: claim.amount_lamports ? claim.amount_lamports / 1000000000 : 0 } };
 }
@@ -195,7 +195,7 @@ async function generateBulkQRs(supabase, count, amount, durationDays) {
       console.log(`❌ Failed to create claim ${i + 1}:`, createError.message);
       throw new Error(`Failed to create claim ${i + 1}: ${createError.message}`);
     }
-    const claimUrl = `${process.env.FRONTEND_URL || 'https://web-production-061ff.up.railway.app'}/claim/${newClaim.code}`;
+    const claimUrl = `${process.env.FRONTEND_URL || 'https://whatnext-backend3-production.up.railway.app'}/claim/${newClaim.code}`;
     const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
     qrData.push({ id: newClaim.id, code: newClaim.code, qr: qrBuffer.toString('base64'), url: claimUrl, amount_lamports: newClaim.amount_lamports, amount_sol: newClaim.amount_lamports / 1000000000 });
   }
