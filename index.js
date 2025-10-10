@@ -10,15 +10,7 @@ initializeDatabase().catch(console.error);
 
 // Middleware
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:5173',
-    'https://whatnext.fun',
-    /\.hostinger\./,
-    /\.000webhostapp\./,
-    /\.hostinger\.com$/,
-    /\.000webhost\.app$/
-  ],
+  origin: true,  // Allow all origins temporarily
   credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
