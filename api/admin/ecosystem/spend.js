@@ -1,161 +1,113 @@
 const express = require('express');
+const { getSupabaseAdminClient } = require('../../database.js');
+
 const router = express.Router();
 
 /**
- * GET /api/admin/ecosystem/spend
- * Get ecosystem spending data for admin dashboard - REDIRECTS TO UNIFIED API
- * This ensures both admin panel and public ecosystem page show the same data
+ * GET /api/ecosystem/spend
+ * Get ecosystem spending data (public endpoint for transparency)
+ * This shows how the community funds are being spent
  */
 router.get('/', async (req, res) => {
   try {
-    console.log('🔍 Admin ecosystem/spend: Fetching spending data...');
+    console.log('🔍 Public ecosystem/spend: Fetching spending data for transparency...');
 
-    // **REDIRECT TO UNIFIED API - ONE SOURCE OF TRUTH**
-    // Call the same unified API that public ecosystem page uses
-    const response = await fetch('https://web-production-061ff.up.railway.app/api/ecosystem/spend', {
-      method: 'GET',
-      headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache'
+    // Set CORS headers for public access
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+    const supabase = getSupabaseAdminClient();
+    
+    if (!supabase) {
+      return res.status(500).json({
+        success: false,
+        error: 'Database not available',
+        entries: [],
+        total: 0
+      });
+    }
+    
+    // Fetch all spending entries from the database
+    const { data: spendEntries, error } = await supabase
+      .from('spend_log')
+      .select('*')
+      .order('date', { ascending: false });
+
+    if (error) {
+      console.error('❌ Database error fetching spend entries:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Database error',
+        message: error.message,
+        entries: [],
+        total: 0
+      });
+    }
+
+    console.log(`✅ Public ecosystem/spend: Retrieved ${spendEntries?.length || 0} spending entries`);
+    
+    // Format the entries for public consumption
+    const formattedEntries = (spendEntries || []).map(entry => ({
+      id: entry.id,
+      description: entry.description || 'Ecosystem Spending',
+      amount_sol: entry.amount_sol || 0,
+      amount_usd: entry.amount_usd || 0,
+      date: entry.date || entry.created_at,
+      category: entry.category || 'general',
+      transaction_hash: entry.transaction_hash || null,
+      wallet_address: entry.wallet_address || null,
+      created_at: entry.created_at,
+      updated_at: entry.updated_at
+    }));
+
+    // Calculate totals
+    const totalSol = formattedEntries.reduce((sum, entry) => sum + (entry.amount_sol || 0), 0);
+    const totalUsd = formattedEntries.reduce((sum, entry) => sum + (entry.amount_usd || 0), 0);
+
+    // Return comprehensive data
+    return res.json({
+      success: true,
+      entries: formattedEntries,
+      total: formattedEntries.length,
+      totals: {
+        total_spent_sol: totalSol,
+        total_spent_usd: totalUsd,
+        entry_count: formattedEntries.length
+      },
+      metadata: {
+        last_updated: new Date().toISOString(),
+        endpoint: 'public',
+        description: 'Community ecosystem spending transparency'
       }
     });
 
-    if (!response.ok) {
-      throw new Error(`Unified API returned ${response.status}`);
-    }
-
-    const data = await response.json();
-    
-    console.log(`✅ Admin ecosystem/spend: Retrieved ${data.entries?.length || 0} spending entries`);
-    
-    // Return the exact same data structure
-    return res.json(data);
-
   } catch (error) {
-    console.error('❌ Error calling unified ecosystem API:', error);
+    console.error('❌ Error in public ecosystem spending endpoint:', error);
     return res.status(500).json({
       success: false,
       error: 'Failed to fetch spending data',
-      message: error instanceof Error ? error.message : 'Unknown error'
+      message: error instanceof Error ? error.message : 'Unknown error',
+      entries: [],
+      total: 0
     });
   }
 });
 
 /**
- * DELETE /api/admin/ecosystem/spend/bulk
- * Bulk delete spending entries (admin only) - ADDED TO FIX 404 ERROR
+ * OPTIONS /api/ecosystem/spend
+ * Handle CORS preflight requests
  */
-router.delete('/bulk', async (req, res) => {
-  try {
-    console.log('🗑️ Admin bulk delete ecosystem spending entries...');
-    
-    const { ids } = req.body;
-    
-    if (!Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid request: ids array is required and cannot be empty'
-      });
-    }
-
-    console.log(`🎯 Deleting ${ids.length} spending entries:`, ids);
-
-    // Import database function here to avoid breaking existing functionality
-    const { getSupabaseAdminClient } = require('../../../database.js');
-    const supabase = getSupabaseAdminClient();
-    
-    // Delete from spend_log table
-    const { data: deletedEntries, error: deleteError } = await supabase
-      .from('spend_log')
-      .delete()
-      .in('id', ids)
-      .select('id, description, amount_sol');
-
-    if (deleteError) {
-      console.error('❌ Database error during bulk delete:', deleteError);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to delete spending entries',
-        details: deleteError.message
-      });
-    }
-
-    const deletedCount = deletedEntries?.length || 0;
-    
-    console.log(`✅ Successfully deleted ${deletedCount} spending entries`);
-    
-    res.json({
-      success: true,
-      message: `Successfully deleted ${deletedCount} spending entries`,
-      deletedCount: deletedCount,
-      deletedIds: deletedEntries?.map(entry => entry.id) || []
-    });
-
-  } catch (error) {
-    console.error('❌ Bulk delete error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error during bulk delete',
-      details: error.message
-    });
-  }
+router.options('/', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Max-Age', '86400');
+  res.status(200).end();
 });
 
-/**
- * DELETE /api/admin/ecosystem/spend/:id
- * Delete single spending entry (admin only) - ADDED FOR SINGLE DELETE FUNCTIONALITY
- */
-router.delete('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    console.log(`🗑️ Admin deleting single ecosystem spending entry: ${id}`);
-
-    // Import database function here to avoid breaking existing functionality
-    const { getSupabaseAdminClient } = require('../../../database.js');
-    const supabase = getSupabaseAdminClient();
-    
-    // Delete the single spending entry
-    const { data: deletedEntry, error: deleteError } = await supabase
-      .from('spend_log')
-      .delete()
-      .eq('id', id)
-      .select('id, description, amount_sol')
-      .single();
-
-    if (deleteError) {
-      if (deleteError.code === 'PGRST116') {
-        return res.status(404).json({
-          success: false,
-          error: 'Spending entry not found'
-        });
-      }
-      
-      console.error('❌ Database error during single delete:', deleteError);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to delete spending entry',
-        details: deleteError.message
-      });
-    }
-
-    console.log(`✅ Successfully deleted single spending entry: ${deletedEntry.description}`);
-    
-    res.json({
-      success: true,
-      message: 'Successfully deleted spending entry',
-      deletedEntry: deletedEntry
-    });
-
-  } catch (error) {
-    console.error('❌ Single delete error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error during single delete',
-      details: error.message
-    });
-  }
-});
+// NOTE: DELETE/UPDATE routes are handled in /api/admin/ecosystem/spend.js only
+// This public endpoint is READ-ONLY for transparency purposes
 
 module.exports = router;
 
