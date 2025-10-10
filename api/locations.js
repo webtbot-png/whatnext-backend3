@@ -1027,19 +1027,19 @@ router.get('/', async (req, res) => {
       console.log('📍 No locations in your database');
       return res.json({ success: true, locations: [] });
     }
-    // Also get content entries for each location - ONLY PUBLISHED with valid media
+    // Also get content entries for each location - ANY STATUS with valid media
     const { data: contentEntries, error: contentError } = await supabase
       .from('content_entries')
       .select('*')
       .not('location_id', 'is', null)
-      .eq('status', 'published')  // Only published content
-      .neq('media_url', '[PENDING]')  // Exclude pending uploads (use neq instead of not + eq)
+      // Remove status filter - include ALL content with valid media
+      .neq('media_url', '[PENDING]')  // Exclude pending uploads
       .not('media_url', 'is', null)  // Exclude null media URLs
       .order('created_at', { ascending: false});
     if (contentError) {
       console.error('❌ Content error:', contentError);
     }
-    console.log(`📄 Found ${contentEntries?.length || 0} published content entries with valid media`);
+    console.log(`📄 Found ${contentEntries?.length || 0} content entries with valid media (any status)`);
     
     // Log which content belongs to which location
     if (contentEntries && contentEntries.length > 0) {
@@ -1091,9 +1091,9 @@ router.get('/', async (req, res) => {
           (content) => content.location_id === loc.id
         );
         
-        // Skip locations without any published content
+        // Skip locations without any content with valid media
         if (!locationContent || locationContent.length === 0) {
-          console.log(`⚠️ Skipping "${loc.name}" (${loc.country_iso3}) - no published content`);
+          console.log(`⚠️ Skipping "${loc.name}" (${loc.country_iso3}) - no content with valid media`);
           return null;
         }
         
