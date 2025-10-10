@@ -12,7 +12,7 @@ router.get('/', async (req, res) => {
 
     // **REDIRECT TO UNIFIED API - ONE SOURCE OF TRUTH**
     // Call the same unified API that public ecosystem page uses
-    const response = await fetch('https://web-production-061ff.up.railway.app/api/ecosystem/spend', {
+    const response = await fetch('https://whatnext-backend3-production.up.railway.app/api/ecosystem/spend', {
       method: 'GET',
       headers: {
         'Cache-Control': 'no-cache, no-store, must-revalidate',
