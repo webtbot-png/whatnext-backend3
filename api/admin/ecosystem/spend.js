@@ -3,40 +3,88 @@ const router = express.Router();
 
 /**
  * GET /api/admin/ecosystem/spend
- * Get ecosystem spending data for admin dashboard - REDIRECTS TO UNIFIED API
- * This ensures both admin panel and public ecosystem page show the same data
+ * Get ecosystem spending data for admin dashboard
+ * Uses direct database access for consistent data
  */
 router.get('/', async (req, res) => {
   try {
     console.log('🔍 Admin ecosystem/spend: Fetching spending data...');
 
-    // **REDIRECT TO UNIFIED API - ONE SOURCE OF TRUTH**
-    // Call the same unified API that public ecosystem page uses
-    const response = await fetch('https://whatnext-backend3-production.up.railway.app/api/ecosystem/spend', {
-      method: 'GET',
-      headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache'
+    // Import database function
+    const { getSupabaseAdminClient } = require('../../../database.js');
+    const supabase = getSupabaseAdminClient();
+    
+    if (!supabase) {
+      return res.status(500).json({
+        success: false,
+        error: 'Database not available',
+        entries: [],
+        total: 0
+      });
+    }
+    
+    // Fetch all spending entries from the database
+    const { data: spendEntries, error } = await supabase
+      .from('spend_log')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('❌ Database error fetching spend entries:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Database error',
+        message: error.message,
+        entries: [],
+        total: 0
+      });
+    }
+
+    console.log(`✅ Admin ecosystem/spend: Retrieved ${spendEntries?.length || 0} spending entries`);
+    
+    // Format the entries for admin consumption
+    const formattedEntries = (spendEntries || []).map(entry => ({
+      id: entry.id,
+      description: entry.description || 'Ecosystem Spending',
+      amount_sol: entry.amount_sol || 0,
+      amount_usd: entry.amount_usd || 0,
+      date: entry.spent_at || entry.created_at,
+      category: entry.category || 'general',
+      transaction_hash: entry.transaction_hash || null,
+      wallet_address: entry.wallet_address || null,
+      created_at: entry.created_at,
+      updated_at: entry.updated_at
+    }));
+
+    // Calculate totals
+    const totalSol = formattedEntries.reduce((sum, entry) => sum + (entry.amount_sol || 0), 0);
+    const totalUsd = formattedEntries.reduce((sum, entry) => sum + (entry.amount_usd || 0), 0);
+
+    // Return comprehensive data
+    return res.json({
+      success: true,
+      entries: formattedEntries,
+      total: formattedEntries.length,
+      totals: {
+        total_spent_sol: totalSol,
+        total_spent_usd: totalUsd,
+        entry_count: formattedEntries.length
+      },
+      metadata: {
+        last_updated: new Date().toISOString(),
+        endpoint: 'admin',
+        description: 'Admin ecosystem spending data'
       }
     });
 
-    if (!response.ok) {
-      throw new Error(`Unified API returned ${response.status}`);
-    }
-
-    const data = await response.json();
-    
-    console.log(`✅ Admin ecosystem/spend: Retrieved ${data.entries?.length || 0} spending entries`);
-    
-    // Return the exact same data structure
-    return res.json(data);
-
   } catch (error) {
-    console.error('❌ Error calling unified ecosystem API:', error);
+    console.error('❌ Error in admin ecosystem spending endpoint:', error);
     return res.status(500).json({
       success: false,
       error: 'Failed to fetch spending data',
-      message: error instanceof Error ? error.message : 'Unknown error'
+      message: error instanceof Error ? error.message : 'Unknown error',
+      entries: [],
+      total: 0
     });
   }
 });
