@@ -18,8 +18,8 @@ router.get('/', async (req, res) => {
       return res.status(500).json({
         success: false,
         error: 'Database not available',
-        entries: [],
-        total: 0
+        spending: [],
+        summary: { total_entries: 0, total_sol_spent: 0, total_usd_spent: 0 }
       });
     }
     
@@ -35,8 +35,8 @@ router.get('/', async (req, res) => {
         success: false,
         error: 'Database error',
         message: error.message,
-        entries: [],
-        total: 0
+        spending: [],
+        summary: { total_entries: 0, total_sol_spent: 0, total_usd_spent: 0 }
       });
     }
 
@@ -60,21 +60,22 @@ router.get('/', async (req, res) => {
     const totalSol = formattedEntries.reduce((sum, entry) => sum + (entry.amount_sol || 0), 0);
     const totalUsd = formattedEntries.reduce((sum, entry) => sum + (entry.amount_usd || 0), 0);
 
-    // Return comprehensive data
+    // Return comprehensive data (matching frontend expectations)
     return res.json({
       success: true,
-      entries: formattedEntries,
-      total: formattedEntries.length,
-      totals: {
-        total_spent_sol: totalSol,
-        total_spent_usd: totalUsd,
-        entry_count: formattedEntries.length
+      spending: formattedEntries,  // Use 'spending' key for consistency
+      summary: {
+        total_entries: formattedEntries.length,
+        total_sol_spent: totalSol,
+        total_usd_spent: totalUsd,
+        categories: {
+          expenses: formattedEntries.length,
+          giveaways: 0,
+          qr_claims: 0
+        },
+        recent_spending: formattedEntries.slice(0, 10)
       },
-      metadata: {
-        last_updated: new Date().toISOString(),
-        endpoint: 'admin',
-        description: 'Admin ecosystem spending data'
-      }
+      message: `Found ${formattedEntries.length} spending entries`
     });
 
   } catch (error) {
@@ -83,8 +84,8 @@ router.get('/', async (req, res) => {
       success: false,
       error: 'Failed to fetch spending data',
       message: error instanceof Error ? error.message : 'Unknown error',
-      entries: [],
-      total: 0
+      spending: [],
+      summary: { total_entries: 0, total_sol_spent: 0, total_usd_spent: 0 }
     });
   }
 });
