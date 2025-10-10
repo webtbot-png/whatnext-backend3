@@ -1,48 +1,11 @@
-const express = require('express');
-const cors = require('cors');
-const { initializeDatabase } = require('./database.js');
+﻿const fs = require('fs');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+console.log(' Starting route fix...');
 
-// Initialize database
-initializeDatabase().catch(console.error);
+const indexPath = './index.js';
+let content = fs.readFileSync(indexPath, 'utf8');
 
-// Middleware
-app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:5173',
-    'https://whatnexttoken.com',
-    'https://www.whatnexttoken.com',
-    'https://whatnext.fun',
-    'https://www.whatnext.fun'
-  ],
-  credentials: true
-}));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
-// Health check
-app.get('/', (req, res) => {
-  res.json({
-    status: 'OK',
-    message: 'WhatNext Backend API - LIVE ON RAILWAY with ALL APIs!',
-    timestamp: new Date().toISOString(),
-    platform: 'Railway',
-    endpoints: '77+ API endpoints active'
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    platform: 'Railway'
-  });
-});
-
-// Mount ALL API routes with error handling
+const newMountRoutes = `// Mount ALL API routes with error handling
 const mountRoutes = () => {
   try {
     let loadedRoutes = 0;
@@ -150,43 +113,21 @@ const mountRoutes = () => {
         const router = require(route.file);
         app.use(route.path, router);
         loadedRoutes++;
-        console.log(` Loaded route: ${route.path}`);
+        console.log(\` Loaded route: \${route.path}\`);
       } catch (error) {
-        console.log(` Could not load route ${route.path}:`, error.message);
+        console.log(\` Could not load route \${route.path}:\`, error.message);
       }
     });
 
-    console.log(` Successfully loaded ${loadedRoutes} API routes`);
+    console.log(\` Successfully loaded \${loadedRoutes} API routes\`);
   } catch (error) {
     console.log(' Error during route mounting:', error.message);
   }
-};
+};`;
 
-// Mount all routes
-mountRoutes();
+const mountRoutesRegex = /\/\/ Mount ALL API routes with error handling[\s\S]*?};/;
+content = content.replace(mountRoutesRegex, newMountRoutes);
 
-// Error handling
-app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  res.status(500).json({ 
-    error: 'Internal Server Error',
-    message: err.message,
-    timestamp: new Date().toISOString()
-  });
-});
+fs.writeFileSync(indexPath, content);
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Not Found',
-    message: `Route ${req.originalUrl} not found`,
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 WhatNext Backend running on port ${PORT}`);
-  console.log(`🌐 Health check: http://localhost:${PORT}/health`);
-});
-
-module.exports = app
+console.log(' Routes fixed!');
