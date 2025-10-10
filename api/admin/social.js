@@ -1,7 +1,7 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../../database.js');
 const jwt = require('jsonwebtoken');
-const fetch = require('node-fetch');
+
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';

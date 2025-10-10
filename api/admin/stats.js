@@ -1,6 +1,6 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../../database.js');
-const fetch = require('node-fetch');
+
 
 const router = express.Router();
 
