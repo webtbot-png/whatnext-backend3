@@ -15,8 +15,7 @@ app.use(cors({
     'http://localhost:5173',
     'https://whatnexttoken.com',
     'https://www.whatnexttoken.com',
-    'https://whatnext.fun',      // WITHOUT www
-    'https://www.whatnext.fun'   // WITH www
+    'https://www.whatnext.fun'
   ],
   credentials: true
 }));
@@ -88,7 +87,6 @@ const mountRoutes = () => {
       { path: '/api/admin', file: './api/admin/index.js' },
       { path: '/api/analytics', file: './api/analytics/index.js' },
       { path: '/api/ecosystem', file: './api/ecosystem/index.js' },
-      { path: '/api/admin/ecosystem/spend', file: './api/admin/ecosystem/spend.js' },
       { path: '/api/pumpfun', file: './api/pumpfun/index.js' },
       { path: '/api/settings', file: './api/settings/index.js' },
       { path: '/api/social', file: './api/social/index.js' },
@@ -101,6 +99,7 @@ const mountRoutes = () => {
       { path: '/api/admin/content', file: './api/admin/content.js' },
       { path: '/api/admin/dashboard', file: './api/admin/dashboard.js' },
       { path: '/api/admin/ecosystem', file: './api/admin/ecosystem.js' },
+      { path: '/api/admin/ecosystem/spend', file: './api/admin/ecosystem/spend.js' },
       { path: '/api/admin/force-populate-settings', file: './api/admin/force-populate-settings.js' },
       { path: '/api/admin/giveaway', file: './api/admin/giveaway.js' },
       { path: '/api/admin/giveaway-payout', file: './api/admin/giveaway-payout.js' },
@@ -136,11 +135,12 @@ const mountRoutes = () => {
       // Other specific routes
       { path: '/api/bunny-net', file: './api/bunny-net/bunny.js' },
       { path: '/api/claim/validate', file: './api/claim/validate.js' },
-      { path: '/api/ecosystem/data', file: './api/ecosystem/data.js' },
-      { path: '/api/ecosystem/fees', file: './api/ecosystem/fees.js' },
-      { path: '/api/ecosystem/pumpfun-fees', file: './api/ecosystem/pumpfun-fees.js' },
-      { path: '/api/ecosystem/spend', file: './api/ecosystem/spend.js' },
-      { path: '/api/ecosystem/wallet', file: './api/ecosystem/wallet.js' },
+      // ❌ REMOVED: Conflicting individual ecosystem routes (handled by '/api/ecosystem' router)
+      // { path: '/api/ecosystem/data', file: './api/ecosystem/data.js' },
+      // { path: '/api/ecosystem/fees', file: './api/ecosystem/fees.js' },
+      // { path: '/api/ecosystem/pumpfun-fees', file: './api/ecosystem/pumpfun-fees.js' },
+      // { path: '/api/ecosystem/spend', file: './api/ecosystem/spend.js' },
+      // { path: '/api/ecosystem/wallet', file: './api/ecosystem/wallet.js' },
       { path: '/api/giveaway/winners', file: './api/giveaway/winners.js' },
       { path: '/api/media/track-view', file: './api/media/track-view.js' },
       { path: '/api/pumpfun/data', file: './api/pumpfun/data.js' },
