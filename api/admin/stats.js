@@ -12,6 +12,7 @@ function verifyAdminToken(req) {
 // Helper function to get real Twitter followers
 async function getTwitterFollowers() {
   try {
+    const fetch = (await import('node-fetch')).default;
     const serverUrl = 'https://web-production-061ff.up.railway.app';
     const response = await fetch(`${serverUrl}/api/social/twitter-followers`, {
       method: 'GET',
@@ -114,4 +115,5 @@ router.get('/', async (req, res) => {
 });
 
 module.exports = router;
+
 
