@@ -88,6 +88,7 @@ const mountRoutes = () => {
       { path: '/api/admin', file: './api/admin/index.js' },
       { path: '/api/analytics', file: './api/analytics/index.js' },
       { path: '/api/ecosystem', file: './api/ecosystem/index.js' },
+      { path: '/api/admin/ecosystem/spend', file: './api/admin/ecosystem/spend.js' },
       { path: '/api/pumpfun', file: './api/pumpfun/index.js' },
       { path: '/api/settings', file: './api/settings/index.js' },
       { path: '/api/social', file: './api/social/index.js' },
