@@ -3,6 +3,14 @@ const { getSupabaseAdminClient  } = require('../../database.js');
 
 const router = express.Router();
 
+// Handle preflight requests for DELETE methods
+router.options('/*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  res.sendStatus(200);
+});
+
 // Use existing SOL price function (simplified to avoid duplication)
 async function getCurrentSolPrice() {
   try {
