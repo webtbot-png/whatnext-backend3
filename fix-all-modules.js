@@ -13,11 +13,10 @@ app.use(cors({
   origin: [
     'http://localhost:3000',
     'http://localhost:5173',
-    'https://whatnext.fun',
-    /\.hostinger\./,
-    /\.000webhostapp\./,
-    /\.hostinger\.com$/,
-    /\.000webhost\.app$/
+    'https://whatnexttoken.com',
+    'https://www.whatnexttoken.com',
+    'https://whatnext.fun',      // WITHOUT www
+    'https://www.whatnext.fun'   // WITH www
   ],
   credentials: true
 }));
