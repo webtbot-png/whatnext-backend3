@@ -10,8 +10,8 @@ router.get('/', async (req, res) => {
   try {
     console.log('🔍 Admin ecosystem/spend: Fetching spending data...');
 
-    // **REDIRECT TO UNIFIED API - ONE SOURCE OF TRUTH**
-    // Call the same unified API that public ecosystem page uses
+    // **REDIRECT TO RAILWAY PRODUCTION API - ONE SOURCE OF TRUTH**
+    // Call the Railway ecosystem API directly
     const response = await fetch('https://whatnext-backend3-production.up.railway.app/api/ecosystem/spend', {
       method: 'GET',
       headers: {
@@ -50,7 +50,7 @@ router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     console.log(`🔍 Admin: Deleting spending entry ID: ${id}`);
 
-    // Forward delete request to the unified API
+    // Forward delete request to the Railway ecosystem API
     const response = await fetch(`https://whatnext-backend3-production.up.railway.app/api/ecosystem/spend/${id}`, {
       method: 'DELETE',
       headers: {
@@ -87,7 +87,7 @@ router.delete('/bulk', async (req, res) => {
     const { ids } = req.body;
     console.log(`🔍 Admin: Bulk deleting ${ids?.length || 0} entries`);
 
-    // Forward bulk delete request to the unified API
+    // Forward bulk delete request to the Railway ecosystem API
     const response = await fetch('https://whatnext-backend3-production.up.railway.app/api/ecosystem/spend/bulk', {
       method: 'DELETE',
       headers: {
