@@ -1,53 +1,85 @@
 const express = require('express');
-const router = express.Router();
+const cors = require('cors');
 
-// API Health check
-router.get('/', (req, res) => {
-  res.json({
-    status: 'OK',
-    message: 'WhatNext API - All endpoints operational',
+// Create Express app
+const app = express();
+
+// CORS configuration
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Body parsing middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Basic health check
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'WhatNext Backend API - Vercel Deployment',
     timestamp: new Date().toISOString(),
-    version: '1.0.0',
-    endpoints: [
-      '/claim', '/giveaway', '/locations', '/media', '/metadata',
-      '/qr-codes', '/raw-db', '/roadmap', '/schedules', '/seed',
-      '/stats', '/testimonials', '/video-test', '/claim-validation',
-      '/debug', '/admin/*', '/analytics/*', '/ecosystem/*', 
-      '/pumpfun/*', '/settings/*', '/social/*'
-    ]
+    platform: 'Vercel',
+    version: '1.0.1'
   });
 });
 
-// Mount main API routes
-try {
-  // Core API routes
-  router.use('/claim', require('./claim.js'));
-  router.use('/giveaway', require('./giveaway.js'));
-  router.use('/locations', require('./locations.js'));
-  router.use('/media', require('./media.js'));
-  router.use('/metadata', require('./metadata.js'));
-  router.use('/qr-codes', require('./qr-codes.js'));
-  router.use('/raw-db', require('./raw-db.js'));
-  router.use('/roadmap', require('./roadmap.js'));
-  router.use('/schedules', require('./schedules.js'));
-  router.use('/seed', require('./seed.js'));
-  router.use('/stats', require('./stats.js'));
-  router.use('/testimonials', require('./testimonials.js'));
-  router.use('/video-test', require('./video-test.js'));
-  router.use('/claim-validation', require('./claim-validation.js'));
-  router.use('/debug', require('./debug.js'));
-  
-  // Directory-based routes with index files
-  router.use('/admin', require('./admin/index.js'));
-  router.use('/analytics', require('./analytics/index.js'));
-  router.use('/ecosystem', require('./ecosystem/index.js'));
-  router.use('/pumpfun', require('./pumpfun/index.js'));
-  router.use('/settings', require('./settings/index.js'));
-  router.use('/social', require('./social/index.js'));
-  
-  console.log('✅ All main API routes loaded in api/index.js');
-} catch (error) {
-  console.log('⚠️ Some API routes failed to load:', error.message);
-}
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    platform: 'Vercel'
+  });
+});
 
-module.exports = router;
+app.get('/api', (req, res) => {
+  res.json({
+    message: 'WhatNext API is operational',
+    endpoints: ['/', '/health', '/api'],
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Test database connection endpoint
+app.get('/api/test-db', async (req, res) => {
+  try {
+    // Basic test without complex imports
+    res.json({
+      status: 'Database connection test',
+      environment: {
+        hasSupabaseUrl: !!process.env.SUPABASE_URL,
+        hasSupabaseKey: !!process.env.SUPABASE_ANON_KEY,
+        nodeEnv: process.env.NODE_ENV
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Database test failed',
+      message: error.message
+    });
+  }
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ 
+    error: 'Internal Server Error',
+    message: err.message,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ 
+    error: 'Not Found',
+    message: `Route ${req.originalUrl} not found`,
+    timestamp: new Date().toISOString()
+  });
+});
+
+module.exports = app;
