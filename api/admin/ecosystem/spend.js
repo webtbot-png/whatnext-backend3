@@ -345,10 +345,11 @@ router.delete('/:id', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Admin ecosystem/spend DELETE error:', error);
-    if (error instanceof Error && error.message === 'Unauthorized') {
+    if (error instanceof Error && (error.message === 'Unauthorized' || error.message.includes('invalid signature') || error.message.includes('jwt'))) {
       return res.status(401).json({ 
         success: false,
-        error: 'Unauthorized' 
+        error: 'Unauthorized - Please log in again',
+        message: 'JWT token is invalid or expired'
       });
     }
     return res.status(500).json({
