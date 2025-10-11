@@ -1,499 +1,197 @@
 const express = require('express');
-const { getSupabaseAdminClient } = require('../../database.js');
-const jwt = require('jsonwebtoken');
+const cors = require('cors');
+const { initializeDatabase } = require('./database.js');
 
-const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-function verifyAdminToken(req) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith('Bearer ')) {
-    throw new Error('Unauthorized');
-  }
-  const token = authHeader.substring(7);
-  jwt.verify(token, JWT_SECRET);
-}
+// Initialize database
+initializeDatabase().catch(console.error);
 
-/**
- * GET /api/admin/ecosystem/spend
- * Get ecosystem spending data for admin dashboard
- */
-router.get('/', async (req, res) => {
-  try {
-    verifyAdminToken(req);
-    console.log('🔍 Admin ecosystem/spend: Fetching spending data...');
-    const supabase = getSupabaseAdminClient();
-    
-    // Fetch spending entries from spend_log
-    const { data: spendEntries, error: spendError } = await supabase
-      .from('spend_log')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (spendError) {
-      console.error('Error fetching spend entries:', spendError);
-      throw spendError;
-    }
+// Middleware
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'https://whatnext.fun'
+  ],
+  credentials: true
+}));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-    // Fetch giveaway payouts
-    const { data: giveawayPayouts, error: giveawayError } = await supabase
-      .from('giveaway_payouts')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (giveawayError) {
-      console.error('Error fetching giveaway payouts:', giveawayError);
-      console.log('Continuing without giveaway payouts data');
-    }
-
-    // Fetch QR claims
-    let qrClaims = [];
-    try {
-      const { data: claimData, error: claimError } = await supabase
-        .from('claim_links')
-        .select('*')
-        .eq('status', 'CLAIMED')
-        .order('created_at', { ascending: false });
-      if (claimError) {
-        console.log('Claims table not found or error:', claimError.message);
-      } else {
-        qrClaims = claimData || [];
-      }
-    } catch (error) {
-      console.log('Claims table not available:', error);
-    }
-
-    // Process and combine all entries (same as ecosystem.js logic)
-    const processedSpends = (spendEntries || []).map(spend => ({
-      id: spend.id,
-      title: spend.title || (spend.description ? spend.description.substring(0, 50) + '...' : ''),
-      amount_sol: spend.amount_sol || 0,
-      amount_usd: spend.amount_usd || null,
-      description: spend.description,
-      category: spend.category || 'expense',
-      transaction_hash: spend.transaction_hash,
-      transaction_verified: spend.transaction_verified || false,
-      spent_at: spend.spent_at || spend.created_at,
-      created_at: spend.created_at,
-      type: 'expense'
-    }));
-
-    const processedGiveaways = (giveawayPayouts || []).map(payout => ({
-      id: payout.id,
-      title: `Giveaway: ${payout.description}`,
-      amount_sol: payout.amount_sol || 0,
-      amount_usd: payout.amount_usd || null,
-      description: payout.description,
-      category: 'giveaway',
-      transaction_hash: payout.transaction_hash,
-      recipient_wallet: payout.recipient_wallet,
-      payout_type: payout.payout_type,
-      spent_at: payout.paid_at || payout.created_at,
-      created_at: payout.created_at,
-      type: 'giveaway'
-    }));
-
-    const processedClaims = qrClaims.map(claim => ({
-      id: claim.id,
-      title: `QR Claim: ${claim.code}`,
-      amount_sol: (claim.amount_lamports || 0) / 1000000000,
-      amount_usd: claim.amount_usd || null,
-      description: `QR Code claim: ${claim.code}`,
-      category: 'qr_claim',
-      transaction_hash: claim.tx_signature,
-      claimer_address: claim.claimer_address,
-      spent_at: claim.claimed_at || claim.created_at,
-      created_at: claim.created_at,
-      type: 'qr_claim'
-    }));
-
-    const allSpending = [...processedSpends, ...processedGiveaways, ...processedClaims]
-      .sort((a, b) => new Date(b.spent_at).getTime() - new Date(a.spent_at).getTime());
-
-    const totalSpent = allSpending.reduce((sum, item) => sum + (item.amount_sol || 0), 0);
-    const totalUsdSpent = allSpending.reduce((sum, item) => sum + (item.amount_usd || 0), 0);
-
-    const summary = {
-      total_entries: allSpending.length,
-      total_sol_spent: totalSpent,
-      total_usd_spent: totalUsdSpent,
-      categories: {
-        expenses: processedSpends.length,
-        giveaways: processedGiveaways.length,
-        qr_claims: processedClaims.length
-      },
-      recent_spending: allSpending.slice(0, 10)
-    };
-
-    console.log(`✅ Admin ecosystem/spend: Retrieved ${allSpending.length} spending entries`);
-    return res.json({
-      success: true,
-      spending: allSpending,
-      summary,
-      message: `Found ${allSpending.length} spending entries`
-    });
-    
-  } catch (error) {
-    console.error('Admin ecosystem/spend error:', error);
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to fetch spending data',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
+// Health check
+app.get('/', (req, res) => {
+  res.json({
+    status: 'OK',
+    message: 'WhatNext Backend API - LIVE ON RAILWAY with ALL APIs!',
+    timestamp: new Date().toISOString(),
+    platform: 'Railway',
+    endpoints: '77+ API endpoints active'
+  });
 });
 
-// Helper function to delete from a specific table
-async function deleteFromTable(supabase, tableName, id, selectFields, successMessage) {
-  const { data: existingEntry, error: checkError } = await supabase
-    .from(tableName)
-    .select(selectFields)
-    .eq('id', id)
-    .single();
-  
-  if (checkError || !existingEntry) {
-    return { success: false, entry: null };
-  }
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    platform: 'Railway'
+  });
+});
 
-  const { error: deleteError } = await supabase
-    .from(tableName)
-    .delete()
-    .eq('id', id);
-  
-  if (deleteError) {
-    throw deleteError;
-  }
-
-  console.log(`✅ Admin ecosystem/spend: ${successMessage}:`, id);
-  return { success: true, entry: existingEntry };
-}
-
-// Helper function to handle successful deletion response
-function createSuccessResponse(message, deletedEntry) {
-  return {
-    success: true,
-    message,
-    deleted_entry: deletedEntry
-  };
-}
-
-// Helper function to group IDs by type
-function groupIdsByType(ids, types) {
-  const entriesByType = {};
-  if (types && Array.isArray(types)) {
-    ids.forEach((id, index) => {
-      const type = types[index] || 'expense';
-      if (!entriesByType[type]) {
-        entriesByType[type] = [];
-      }
-      entriesByType[type].push(id);
-    });
-  } else {
-    entriesByType['expense'] = ids;
-  }
-  return entriesByType;
-}
-
-// Helper function to delete entries from a specific table (bulk)
-async function bulkDeleteFromTable(supabase, tableName, ids, selectFields) {
-  if (!ids || ids.length === 0) {
-    return { deletedEntries: [], count: 0 };
-  }
-
-  const { data: entries, error: fetchError } = await supabase
-    .from(tableName)
-    .select(selectFields)
-    .in('id', ids);
-  
-  if (fetchError || !entries || entries.length === 0) {
-    return { deletedEntries: [], count: 0 };
-  }
-
-  const { error: deleteError } = await supabase
-    .from(tableName)
-    .delete()
-    .in('id', ids);
-  
-  if (deleteError) {
-    console.error(`Error deleting ${tableName} entries:`, deleteError);
-    return { deletedEntries: [], count: 0 };
-  }
-
-  console.log(`✅ Deleted ${entries.length} ${tableName} entries`);
-  return { deletedEntries: entries, count: entries.length };
-}
-
-/**
- * DELETE /api/admin/ecosystem/spend/:id
- * Delete a single spending entry (refactored for reduced complexity)
- */
-router.delete('/:id', async (req, res) => {
+// Mount ALL API routes with error handling
+const mountRoutes = () => {
   try {
-    verifyAdminToken(req);
-    const { id } = req.params;
-    
-    if (!id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Spending entry ID is required'
-      });
-    }
-
-    const supabase = getSupabaseAdminClient();
-    console.log('�️ Admin ecosystem/spend: Deleting spending entry:', id);
-    
-    // Define table configurations for cleaner code
-    const tableConfigs = [
-      {
-        table: 'spend_log',
-        fields: 'id, title, amount_sol',
-        message: 'Successfully deleted spending entry',
-        responseMessage: 'Spending entry deleted successfully'
-      },
-      {
-        table: 'giveaway_payouts',
-        fields: 'id, description, amount_sol',
-        message: 'Successfully deleted giveaway payout',
-        responseMessage: 'Giveaway payout deleted successfully'
-      },
-      {
-        table: 'claim_links',
-        fields: 'id, code, amount_lamports',
-        message: 'Successfully deleted claim link',
-        responseMessage: 'Claim link deleted successfully'
-      }
+    // Working CommonJS routes
+    const workingRoutes = [
+      { path: '/api/stats', file: './api/stats.js' },
+      { path: '/api/locations', file: './api/locations.js' },
+      { path: '/api/debug', file: './api/debug.js' }
     ];
 
-    // Try deleting from each table in sequence
-    for (const config of tableConfigs) {
-      const result = await deleteFromTable(
-        supabase, 
-        config.table, 
-        id, 
-        config.fields, 
-        config.message
-      );
+    let loadedRoutes = 0;
+    
+    workingRoutes.forEach(route => {
+      try {
+        const router = require(route.file);
+        app.use(route.path, router);
+        loadedRoutes++;
+        console.log(`✅ Loaded working route: ${route.path}`);
+      } catch (error) {
+        console.log(`⚠️ Could not load working route ${route.path}:`, error.message);
+      }
+    });
+
+    // Try to load original routes (ALL 82+ APIs)
+    const originalRoutes = [
+      // Main API files
+      { path: '/api/claim', file: './api/claim.js' },
+      { path: '/api/giveaway', file: './api/giveaway.js' },
+      { path: '/api/locations', file: './api/locations.js' },
+      { path: '/api/media', file: './api/media.js' },
+      { path: '/api/metadata', file: './api/metadata.js' },
+      { path: '/api/qr-codes', file: './api/qr-codes.js' },
+      { path: '/api/raw-db', file: './api/raw-db.js' },
+      { path: '/api/roadmap', file: './api/roadmap.js' },
+      { path: '/api/schedules', file: './api/schedules.js' },
+      { path: '/api/seed', file: './api/seed.js' },
+      { path: '/api/stats', file: './api/stats.js' },
+      { path: '/api/testimonials', file: './api/testimonials.js' },
+      { path: '/api/video-test', file: './api/video-test.js' },
+      { path: '/api/claim-validation', file: './api/claim-validation.js' },
+      { path: '/api/debug', file: './api/debug.js' },
       
-      if (result.success) {
-        return res.json(createSuccessResponse(config.responseMessage, result.entry));
-      }
-    }
-
-    return res.status(404).json({
-      success: false,
-      error: 'Spending entry not found'
-    });
-  } catch (error) {
-    console.error('Admin ecosystem/spend DELETE error:', error);
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to delete spending entry',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
-/**
- * POST /api/admin/ecosystem/spend
- * Add a new spending entry
- */
-router.post('/', async (req, res) => {
-  try {
-    verifyAdminToken(req);
-    const { title, description, amount_sol, amount_usd, category, transaction_hash } = req.body;
-    
-    if (!title && !description) {
-      return res.status(400).json({
-        success: false,
-        error: 'Title or description is required'
-      });
-    }
-    
-    if (!amount_sol || amount_sol <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Valid SOL amount is required'
-      });
-    }
-
-    const supabase = getSupabaseAdminClient();
-    console.log('➕ Admin ecosystem/spend: Adding new spending entry');
-    
-    const newEntry = {
-      title: title || description?.substring(0, 50),
-      description: description || title,
-      amount_sol: parseFloat(amount_sol),
-      amount_usd: amount_usd ? parseFloat(amount_usd) : null,
-      category: category || 'expense',
-      transaction_hash: transaction_hash || null,
-      transaction_verified: false,
-      spent_at: new Date().toISOString(),
-      created_at: new Date().toISOString()
-    };
-
-    const { data: createdEntry, error } = await supabase
-      .from('spend_log')
-      .insert([newEntry])
-      .select()
-      .single();
-
-    if (error) {
-      console.error('Error creating spending entry:', error);
-      throw error;
-    }
-
-    console.log('✅ Admin ecosystem/spend: Successfully created spending entry:', createdEntry.id);
-    return res.json({
-      success: true,
-      message: 'Spending entry created successfully',
-      entry: createdEntry
-    });
-    
-  } catch (error) {
-    console.error('Admin ecosystem/spend POST error:', error);
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to create spending entry',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
-/**
- * GET /api/admin/ecosystem/spend/bulk
- * Get bulk operations info (for frontend compatibility)
- */
-router.get('/bulk', async (req, res) => {
-  try {
-    verifyAdminToken(req);
-    console.log('ℹ️ Admin ecosystem/spend/bulk GET: Returning bulk operations info');
-    
-    res.json({
-      success: true,
-      message: 'Bulk operations endpoint is operational',
-      info: 'Use POST method with action and ids to perform bulk operations',
-      supported_actions: ['delete'],
-      example: {
-        method: 'POST',
-        body: {
-          action: 'delete',
-          ids: ['id1', 'id2', 'id3'],
-          types: ['expense', 'giveaway', 'qr_claim']
-        }
-      }
-    });
-  } catch (error) {
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error'
-    });
-  }
-});
-
-/**
- * POST /api/admin/ecosystem/spend/bulk - Bulk operations (delete multiple entries)
- */
-router.post('/bulk', async (req, res) => {
-  try {
-    verifyAdminToken(req);
-    const { action, ids, types } = req.body;
-    
-    if (!action || !Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Action and array of IDs are required'
-      });
-    }
-
-    if (action !== 'delete') {
-      return res.status(400).json({
-        success: false,
-        error: 'Only "delete" action is supported'
-      });
-    }
-
-    const supabase = getSupabaseAdminClient();
-    console.log('�️ Admin ecosystem/spend/bulk: Deleting entries:', { ids, types });
-    
-    // Group IDs by type for efficient deletion
-    const entriesByType = groupIdsByType(ids, types);
-    
-    let deletedEntries = [];
-    let totalDeleted = 0;
-
-    // Define table configurations for bulk operations
-    const bulkTableConfigs = [
-      { 
-        type: 'expense', 
-        table: 'spend_log', 
-        fields: 'id, title, amount_sol, description' 
-      },
-      { 
-        type: 'giveaway', 
-        table: 'giveaway_payouts', 
-        fields: 'id, description, amount_sol, recipient_wallet' 
-      },
-      { 
-        type: 'qr_claim', 
-        table: 'claim_links', 
-        fields: 'id, code, amount_lamports, claimer_address' 
-      }
+      // Directory routes with index files
+      { path: '/api/admin', file: './api/admin/index.js' },
+      { path: '/api/analytics', file: './api/analytics/index.js' },
+      { path: '/api/pumpfun', file: './api/pumpfun/index.js' },
+      { path: '/api/settings', file: './api/settings/index.js' },
+      { path: '/api/social', file: './api/social/index.js' },
+      
+      // Individual subdirectory files
+      { path: '/api/admin/add-password', file: './api/admin/add-password.js' },
+      { path: '/api/admin/analytics', file: './api/admin/analytics.js' },
+      { path: '/api/admin/api-config', file: './api/admin/api-config.js' },
+      { path: '/api/admin/claims', file: './api/admin/claims.js' },
+      { path: '/api/admin/content', file: './api/admin/content.js' },
+      { path: '/api/admin/dashboard', file: './api/admin/dashboard.js' },
+      { path: '/api/admin/ecosystem', file: './api/admin/ecosystem.js' },
+      { path: '/api/admin/ecosystem/spend', file: './api/admin/ecosystem/spend.js' },
+      { path: '/api/admin/force-populate-settings', file: './api/admin/force-populate-settings.js' },
+      { path: '/api/admin/giveaway', file: './api/admin/giveaway.js' },
+      { path: '/api/admin/giveaway-payout', file: './api/admin/giveaway-payout.js' },
+      { path: '/api/admin/giveaway-process', file: './api/admin/giveaway-process.js' },
+      { path: '/api/admin/live-stream', file: './api/admin/live-stream.js' },
+      { path: '/api/admin/locations', file: './api/admin/locations.js' },
+      { path: '/api/admin/login', file: './api/admin/login.js' },
+      { path: '/api/admin/media', file: './api/admin/media.js' },
+      { path: '/api/admin/populate-settings', file: './api/admin/populate-settings.js' },
+      { path: '/api/admin/pumpfun', file: './api/admin/pumpfun.js' },
+      { path: '/api/admin/roadmap', file: './api/admin/roadmap.js' },
+      { path: '/api/admin/schedules', file: './api/admin/schedules.js' },
+      { path: '/api/admin/settings', file: './api/admin/settings.js' },
+      { path: '/api/admin/settings/api-config', file: './api/admin/settings/api-config.js' },
+      { path: '/api/admin/social', file: './api/admin/social.js' },
+      { path: '/api/admin/social/update-followers', file: './api/admin/social/update-followers.js' },
+      { path: '/api/admin/stats', file: './api/admin/stats.js' },
+      { path: '/api/admin/toggle-live', file: './api/admin/toggle-live.js' },
+      { path: '/api/admin/upload', file: './api/admin/upload.js' },
+      { path: '/api/admin/users', file: './api/admin/users.js' },
+      
+      // Analytics routes
+      { path: '/api/analytics/live', file: './api/analytics/live.js' },
+      { path: '/api/analytics/performance', file: './api/analytics/performance.js' },
+      { path: '/api/analytics/realtime', file: './api/analytics/realtime.js' },
+      { path: '/api/analytics/track/session', file: './api/analytics/track/session.js' },
+      { path: '/api/analytics/track/session-update', file: './api/analytics/track/session-update.js' },
+      { path: '/api/analytics/track-event', file: './api/analytics/track-event.js' },
+      { path: '/api/analytics/track-pageview', file: './api/analytics/track-pageview.js' },
+      { path: '/api/analytics/track-visitor', file: './api/analytics/track-visitor.js' },
+      { path: '/api/analytics/update-pageview', file: './api/analytics/update-pageview.js' },
+      
+      // Other specific routes
+      { path: '/api/bunny-net', file: './api/bunny-net/bunny.js' },
+      { path: '/api/claim/validate', file: './api/claim/validate.js' },
+      { path: '/api/ecosystem/data', file: './api/ecosystem/data.js' },
+      { path: '/api/ecosystem/fees', file: './api/ecosystem/fees.js' },
+      { path: '/api/ecosystem/pumpfun-fees', file: './api/ecosystem/pumpfun-fees.js' },
+      { path: '/api/ecosystem/spend', file: './api/ecosystem/spend.js' },
+      { path: '/api/ecosystem/wallet', file: './api/ecosystem/wallet.js' },
+      { path: '/api/giveaway/winners', file: './api/giveaway/winners.js' },
+      { path: '/api/media/track-view', file: './api/media/track-view.js' },
+      { path: '/api/pumpfun/data', file: './api/pumpfun/data.js' },
+      { path: '/api/pumpfun/stats', file: './api/pumpfun/stats.js' },
+      { path: '/api/pumpfun/token-data', file: './api/pumpfun/token-data.js' },
+      { path: '/api/roadmap/status', file: './api/roadmap/status.js' },
+      { path: '/api/roadmap/tasks', file: './api/roadmap/tasks.js' },
+      { path: '/api/settings/public', file: './api/settings/public.js' },
+      { path: '/api/social/auto-update', file: './api/social/auto-update.js' },
+      { path: '/api/social/community-tweets', file: './api/social/community-tweets.js' },
+      { path: '/api/social/twitter-followers', file: './api/social/twitter-followers.js' },
+      { path: '/api/twitter/stats', file: './api/twitter/stats.js' }
     ];
 
-    // Process each table type
-    for (const config of bulkTableConfigs) {
-      const result = await bulkDeleteFromTable(
-        supabase,
-        config.table,
-        entriesByType[config.type],
-        config.fields
-      );
-      
-      deletedEntries.push(...result.deletedEntries);
-      totalDeleted += result.count;
-    }
-
-    if (totalDeleted === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'No entries found with the provided IDs'
-      });
-    }
-
-    console.log(`✅ Admin ecosystem/spend/bulk: Successfully deleted ${totalDeleted} entries total`);
-    return res.json({
-      success: true,
-      message: `Successfully deleted ${totalDeleted} entries`,
-      deleted_count: totalDeleted,
-      deleted_entries: deletedEntries,
-      deleted_by_type: {
-        expenses: entriesByType['expense']?.length || 0,
-        giveaways: entriesByType['giveaway']?.length || 0,
-        qr_claims: entriesByType['qr_claim']?.length || 0
+    originalRoutes.forEach(route => {
+      try {
+        const router = require(route.file);
+        app.use(route.path, router);
+        loadedRoutes++;
+        console.log(`✅ Loaded original route: ${route.path}`);
+      } catch (error) {
+        console.log(`⚠️ Could not load original route ${route.path}:`, error.message);
       }
     });
+
+    console.log(`✅ Successfully loaded ${loadedRoutes} API routes`);
   } catch (error) {
-    console.error('Admin ecosystem/spend/bulk error:', error);
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    return res.status(500).json({
-      success: false,
-      error: 'Failed to bulk delete spending entries',
-      message: error instanceof Error ? error.message : 'Unknown error'
-    });
+    console.log('⚠️ Error during route mounting:', error.message);
   }
+};
+
+// Mount all routes
+mountRoutes();
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ 
+    error: 'Internal Server Error',
+    message: err.message,
+    timestamp: new Date().toISOString()
+  });
 });
 
-module.exports = router;
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ 
+    error: 'Not Found',
+    message: `Route ${req.originalUrl} not found`,
+    timestamp: new Date().toISOString()
+  });
+});
 
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 WhatNext Backend running on port ${PORT} with ALL APIs`);
+});
+
+module.exports = app;
