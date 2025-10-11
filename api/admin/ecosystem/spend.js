@@ -35,14 +35,29 @@ router.get('/test-delete/:id', (req, res) => {
 
 function verifyAdminToken(req) {
   const authHeader = req.headers.authorization;
+  console.log('🔐 Spend Auth Check:', { 
+    hasAuthHeader: !!authHeader, 
+    headerPrefix: authHeader?.substring(0, 10),
+    jwtSecret: JWT_SECRET ? 'SET' : 'NOT_SET',
+    environment: process.env.NODE_ENV || 'development',
+    requestPath: req.path
+  });
+  
   if (!authHeader?.startsWith('Bearer ')) {
+    console.log('❌ Missing or invalid Bearer token format');
     throw new Error('Unauthorized');
   }
   const token = authHeader.substring(7);
   try {
     jwt.verify(token, JWT_SECRET);
+    console.log('✅ Spend JWT verification successful');
   } catch (jwtError) {
-    console.log('JWT verification failed:', jwtError.message);
+    console.log('❌ Spend JWT verification failed:', jwtError.message);
+    console.log('🔍 JWT Details:', {
+      tokenLength: token.length,
+      secretLength: JWT_SECRET.length,
+      errorType: jwtError.name
+    });
     throw new Error('Unauthorized');
   }
 }
@@ -167,7 +182,17 @@ router.get('/', async (req, res) => {
   try {
     verifyAdminToken(req);
     console.log('🔍 Admin ecosystem/spend: Fetching spending data from ALL tables (spend_log + giveaway_payouts + claim_links)...');
+    
     const supabase = getSupabaseAdminClient();
+    if (!supabase) {
+      console.error('❌ Failed to get Supabase admin client');
+      return res.status(500).json({
+        success: false,
+        error: 'Database connection failed',
+        message: 'Could not connect to database'
+      });
+    }
+    console.log('✅ Supabase admin client obtained');
     
     // Fetch all data in parallel (same as public endpoint)
     const [spendEntries, giveawayPayouts, qrClaims] = await Promise.all([
