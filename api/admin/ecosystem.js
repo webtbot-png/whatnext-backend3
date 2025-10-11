@@ -6,13 +6,14 @@ const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
 
 // Mount debug router for Railway troubleshooting
-try {
-  const debugRouter = require('./railway-debug.js');
-  router.use('/debug', debugRouter);
-  console.log('✅ Loaded Railway debug router at /api/admin/ecosystem/debug');
-} catch (error) {
-  console.error('❌ Failed to load debug router:', error);
-}
+// Temporarily disabled until railway-debug.js is created
+// try {
+//   const debugRouter = require('./railway-debug.js');
+//   router.use('/debug', debugRouter);
+//   console.log('✅ Loaded Railway debug router at /api/admin/ecosystem/debug');
+// } catch (error) {
+//   console.error('❌ Failed to load debug router:', error);
+// }
 
 // Mount the complete spend router with ALL CRUD operations
 try {
