@@ -107,7 +107,7 @@ router.get('/status', async (req, res) => {
     const { data: claimLink, error } = await supabase
       .from('claim_links')
       .select('*')
-      .eq('code', code)
+      .eq('code', code.toUpperCase())
       .single();
     console.log(`🔍 Database response for code ${code}:`, claimLink);
     if (error || !claimLink) {
@@ -188,7 +188,7 @@ router.post('/process', async (req, res) => {
     const { data: claimLink, error: fetchError } = await supabase
       .from('claim_links')
       .select('*')
-      .eq('code', code)
+      .eq('code', code.toUpperCase())
       .single();
     
     if (fetchError || !claimLink) {
@@ -343,7 +343,7 @@ router.post('/', async (req, res) => {
     const { data: claimLink, error: fetchError } = await supabase
       .from('claim_links')
       .select('*')
-      .eq('code', validatedCode)
+      .eq('code', validatedCode.toUpperCase())
       .single();
     
     if (fetchError || !claimLink) {
