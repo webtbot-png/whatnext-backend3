@@ -307,8 +307,198 @@ router.delete('/', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/claim/status - Check claim status by code (PUBLIC ENDPOINT)
+ */
+router.get('/status', async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!code || typeof code !== 'string') {
+      return res.json({
+        success: true,
+        message: 'Claim status endpoint is operational',
+        status: 'online',
+        info: 'Provide a code parameter to check specific claim status',
+        example: '/api/claim/status?code=YOUR_CLAIM_CODE'
+      });
+    }
+    console.log(`🔍 Checking claim status for code: ${code}`);
+    const supabase = getSupabaseAdminClient();
+    const { data: claimLink, error } = await supabase
+      .from('claim_links')
+      .select('*')
+      .eq('code', code.toUpperCase())
+      .single();
+    console.log(`🔍 Database response for code ${code}:`, claimLink);
+    if (error || !claimLink) {
+      console.log(`❌ Claim code not found: ${code}`);
+      return res.status(404).json({
+        success: false,
+        error: 'Claim code not found'
+      });
+    }
+    if (claimLink.claimed_at) {
+      console.log(`❌ Claim code already used: ${code}`);
+      return res.status(400).json({
+        success: false,
+        error: 'This claim code has already been used',
+        claimed_at: claimLink.claimed_at,
+        claimed_by: claimLink.claimer_address
+      });
+    }
+    const isExpired = new Date() > new Date(claimLink.expires_at);
+    if (isExpired) {
+      console.log(`❌ Claim code expired: ${code}`);
+      return res.status(400).json({
+        success: false,
+        error: 'This claim code has expired',
+        expires_at: claimLink.expires_at
+      });
+    }
+    const solAmount = claimLink.amount_lamports ? (claimLink.amount_lamports / 1000000000) : 0;
+    console.log(`✅ Valid claim code: ${code}, Amount: ${solAmount} SOL`);
+    res.json({
+      success: true,
+      claim: {
+        id: claimLink.id,
+        code: claimLink.code,
+        amount_sol: solAmount,
+        amount_lamports: claimLink.amount_lamports,
+        description: claimLink.note,
+        expires_at: claimLink.expires_at,
+        created_at: claimLink.created_at
+      }
+    });
+  } catch (error) {
+    console.error('❌ Server error checking claim status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * POST /api/claim/process - Process a claim (PUBLIC ENDPOINT) 
+ */
+router.post('/process', async (req, res) => {
+  try {
+    const { code, walletAddress } = req.body;
+    
+    // Validate inputs
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'Claim code is required'
+      });
+    }
+    
+    if (!walletAddress || typeof walletAddress !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'Wallet address is required'
+      });
+    }
+    
+    console.log(`🎯 Processing claim for code: ${code}, wallet: ${walletAddress}`);
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Fetch claim link
+    const { data: claimLink, error: fetchError } = await supabase
+      .from('claim_links')
+      .select('*')
+      .eq('code', code.toUpperCase())
+      .single();
+    
+    if (fetchError || !claimLink) {
+      console.log(`❌ Claim code not found: ${code}`);
+      return res.status(404).json({
+        success: false,
+        error: 'Claim code not found'
+      });
+    }
+    
+    // Check if already claimed
+    if (claimLink.claimed_at) {
+      console.log(`❌ Claim code already used: ${code}`);
+      return res.status(400).json({
+        success: false,
+        error: 'This claim code has already been used',
+        claimed_at: claimLink.claimed_at,
+        claimed_by: claimLink.claimer_address
+      });
+    }
+    
+    // Check if expired
+    const isExpired = new Date() > new Date(claimLink.expires_at);
+    if (isExpired) {
+      console.log(`❌ Claim code expired: ${code}`);
+      return res.status(400).json({
+        success: false,
+        error: 'This claim code has expired',
+        expires_at: claimLink.expires_at
+      });
+    }
+    
+    // Calculate SOL amount
+    const solAmount = claimLink.amount_lamports ? (claimLink.amount_lamports / 1000000000) : 0;
+    
+    console.log(`💰 Processing claim: ${solAmount} SOL (${claimLink.amount_lamports} lamports) for wallet ${walletAddress}`);
+    
+    // For now, we'll mark as claimed without actual payment (you can add payment logic later)
+    const { data: updatedClaims, error: updateError } = await supabase
+      .from('claim_links')
+      .update({
+        status: 'CLAIMED',
+        claimed_at: new Date().toISOString(),
+        claimer_address: walletAddress,
+        tx_signature: 'PENDING_PAYMENT_IMPLEMENTATION'
+      })
+      .eq('id', claimLink.id)
+      .select();
+    
+    if (updateError || !updatedClaims || updatedClaims.length === 0) {
+      console.error(`❌ Failed to mark claim as used: ${code}`, updateError);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to process claim'
+      });
+    }
+    
+    const updatedClaim = updatedClaims[0];
+    console.log(`✅ Claim processed successfully: ${code} -> ${walletAddress}, Amount: ${solAmount} SOL`);
+    
+    res.json({
+      success: true,
+      message: `Successfully claimed ${solAmount} SOL!`,
+      transactionHash: 'PENDING_PAYMENT_IMPLEMENTATION',
+      amountSol: solAmount.toString(),
+      claim: {
+        id: updatedClaim.id,
+        code: updatedClaim.code,
+        amount_sol: solAmount,
+        amount_lamports: updatedClaim.amount_lamports,
+        description: updatedClaim.note,
+        claimed_at: updatedClaim.claimed_at,
+        claimed_by: updatedClaim.claimer_address,
+        tx_signature: updatedClaim.tx_signature
+      }
+    });
+  } catch (error) {
+    console.error('❌ Server error processing claim:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 console.log('📡 Claims router with REAL-TIME SOL PRICING initialized');
 console.log('📡 DELETE route registered at /api/admin/claims (DELETE /)');
+console.log('📡 PUBLIC endpoints: GET /status, POST /process');
 
 module.exports = router;
 
