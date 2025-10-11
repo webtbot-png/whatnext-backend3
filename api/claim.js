@@ -324,11 +324,28 @@ router.get('/status', async (req, res) => {
     }
     console.log(`🔍 Checking claim status for code: ${code}`);
     const supabase = getSupabaseAdminClient();
-    const { data: claimLink, error } = await supabase
+    
+    // Try original case first, then uppercase as fallback
+    let claimLink, error;
+    const { data: claimLinkOriginal, error: errorOriginal } = await supabase
       .from('claim_links')
       .select('*')
-      .eq('code', code.toUpperCase())
+      .eq('code', code)
       .single();
+    
+    if (!errorOriginal && claimLinkOriginal) {
+      claimLink = claimLinkOriginal;
+      error = errorOriginal;
+    } else {
+      // Fallback to uppercase
+      const { data: claimLinkUpper, error: errorUpper } = await supabase
+        .from('claim_links')
+        .select('*')
+        .eq('code', code.toUpperCase())
+        .single();
+      claimLink = claimLinkUpper;
+      error = errorUpper;
+    }
     console.log(`🔍 Database response for code ${code}:`, claimLink);
     if (error || !claimLink) {
       console.log(`❌ Claim code not found: ${code}`);
@@ -405,12 +422,27 @@ router.post('/process', async (req, res) => {
     
     const supabase = getSupabaseAdminClient();
     
-    // Fetch claim link
-    const { data: claimLink, error: fetchError } = await supabase
+    // Fetch claim link - try original case first, then uppercase
+    let claimLink, fetchError;
+    const { data: claimLinkOriginal, error: errorOriginal } = await supabase
       .from('claim_links')
       .select('*')
-      .eq('code', code.toUpperCase())
+      .eq('code', code)
       .single();
+    
+    if (!errorOriginal && claimLinkOriginal) {
+      claimLink = claimLinkOriginal;
+      fetchError = errorOriginal;
+    } else {
+      // Fallback to uppercase
+      const { data: claimLinkUpper, error: errorUpper } = await supabase
+        .from('claim_links')
+        .select('*')
+        .eq('code', code.toUpperCase())
+        .single();
+      claimLink = claimLinkUpper;
+      fetchError = errorUpper;
+    }
     
     if (fetchError || !claimLink) {
       console.log(`❌ Claim code not found: ${code}`);
