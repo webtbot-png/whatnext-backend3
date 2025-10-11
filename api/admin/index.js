@@ -41,7 +41,8 @@ router.get('/', (req, res) => {
     timestamp: new Date().toISOString(),
     availableEndpoints: [
       '/login', '/dashboard', '/users', '/settings', '/analytics',
-      '/content', '/media', '/upload', '/giveaway', '/claims', '/stats'
+      '/content', '/media', '/upload', '/giveaway', '/claims', '/stats',
+      '/ecosystem', '/ecosystem/spend'
     ]
   });
 });
