@@ -115,7 +115,7 @@ function formatPayoutEntries(entries, currentSolPrice) {
     const dynamicUsdValue = entry.amount_sol * currentSolPrice;
     return {
       id: entry.id,
-      type: 'giveaway_payout',
+      type: 'expense', // FRONTEND FIX: Change from 'giveaway_payout' to 'expense' so frontend counts it
       amount: entry.amount_sol,
       currency: 'SOL',
       description: entry.description,
@@ -136,7 +136,7 @@ function formatClaimEntries(entries, currentSolPrice) {
     const dynamicUsdValue = solAmount * currentSolPrice;
     return {
       id: `claim_${entry.id}`,
-      type: 'qr_claim',
+      type: 'expense', // FRONTEND FIX: Change from 'qr_claim' to 'expense' so frontend counts it
       amount: solAmount,
       currency: 'SOL',
       description: `QR Claim Payout - Code: ${entry.code}`,
@@ -285,6 +285,13 @@ router.get('/', async (req, res) => {
       count: combinedEntries.length, // Add this for frontend compatibility
       total: combinedEntries.length, // Add this too in case frontend looks for 'total'
       spendCount: combinedEntries.length, // Add this in case frontend looks for 'spendCount'
+      // DEBUG: Add type breakdown to help identify frontend filtering
+      typeBreakdown: {
+        expenses: formattedSpendEntries.filter(e => e.type === 'expense').length,
+        giveaway_expenses: formattedSpendEntries.filter(e => e.type === 'giveaway_expense').length,
+        giveaway_payouts: formattedPayoutEntries.length,
+        qr_claims: formattedClaimEntries.length
+      },
       totals: {
         spendCount: combinedEntries.length, // FRONTEND FIX: Change this from spendEntries.length to combinedEntries.length
         payoutCount: payoutEntries.length,
