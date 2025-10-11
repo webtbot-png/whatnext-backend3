@@ -252,7 +252,8 @@ function processBulkDeleteResults(results) {
 router.get('/', async (req, res) => {
   try {
     // verifyAdminToken(req); // Temporarily disabled for frontend compatibility
-    console.log('🔍 Admin ecosystem/spend: Fetching spending data...');
+    console.log('🔍 REFACTORED VERSION: Admin ecosystem/spend: Fetching spending data...');
+    console.log('🔍 REFACTORED VERSION: File timestamp verification - This is the SonarQube-compliant version with 12 helper functions');
 
     const supabase = getSupabaseAdminClient();
     
