@@ -29,26 +29,24 @@ router.get('/', async (req, res) => {
 
     console.log(`✅ Found ${claimLinks?.length || 0} QR codes in database`);
 
-    // Fetch live SOL price for USD conversions - ALWAYS LIVE PRICE
-    let solPrice;
+    // Fetch live SOL price for USD conversions - WITH FALLBACK
+    let solPrice = 177.66; // Default fallback price
     try {
       const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
       if (!response.ok) {
         throw new Error(`CoinGecko API failed with status: ${response.status}`);
       }
       const data = await response.json();
-      solPrice = data.solana?.usd;
-      if (!solPrice || solPrice <= 0) {
-        throw new Error('Invalid SOL price received from CoinGecko API');
+      const livePrice = data.solana?.usd;
+      if (livePrice && livePrice > 0) {
+        solPrice = livePrice;
+        console.log(`✅ Live SOL price fetched: $${solPrice}`);
+      } else {
+        console.log(`⚠️ Invalid price from CoinGecko, using fallback: $${solPrice}`);
       }
-      console.log(`✅ Live SOL price fetched: $${solPrice}`);
     } catch (err) {
-      console.error('❌ Critical error: Failed to fetch live SOL price:', err.message);
-      return res.status(503).json({
-        success: false,
-        error: 'Service temporarily unavailable - unable to fetch live SOL price',
-        details: 'Live pricing is required for accurate QR code valuations'
-      });
+      console.error(`⚠️ Failed to fetch live SOL price: ${err.message}, using fallback: $${solPrice}`);
+      // Continue with fallback price instead of returning error
     }
 
     // Process and format the QR codes data
