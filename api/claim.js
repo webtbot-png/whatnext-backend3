@@ -1,5 +1,5 @@
 const express = require('express');
-const { getSupabaseAdminClient  } = require('../../database.js');
+const { getSupabaseAdminClient  } = require('../database.js');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
@@ -526,7 +526,7 @@ router.post('/process', async (req, res) => {
       details: error instanceof Error ? error.message : 'Unknown error'
     });
   }
-}); 
+});
 
 console.log('📡 Claims router with REAL-TIME SOL PRICING initialized');
 console.log('📡 DELETE route registered at /api/admin/claims (DELETE /)');
