@@ -176,6 +176,209 @@ router.post('/spend', async (req, res) => {
   }
 });
 
+// DELETE /api/admin/ecosystem/spend/:id - Single delete
+router.delete('/spend/:id', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { id } = req.params;
+    
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Spending entry ID is required'
+      });
+    }
+
+    const supabase = getSupabaseAdminClient();
+    console.log('🗑️ Admin ecosystem/spend: Deleting spending entry:', id);
+    
+    // Check if entry exists first
+    const { data: existingEntry, error: checkError } = await supabase
+      .from('spend_log')
+      .select('id, title, amount_sol')
+      .eq('id', id)
+      .single();
+    
+    if (checkError || !existingEntry) {
+      return res.status(404).json({
+        success: false,
+        error: 'Spending entry not found'
+      });
+    }
+
+    // Delete the entry
+    const { error: deleteError } = await supabase
+      .from('spend_log')
+      .delete()
+      .eq('id', id);
+    
+    if (deleteError) {
+      console.error('Error deleting spending entry:', deleteError);
+      throw deleteError;
+    }
+
+    console.log('✅ Admin ecosystem/spend: Successfully deleted spending entry:', id);
+    return res.json({
+      success: true,
+      message: 'Spending entry deleted successfully',
+      deleted_entry: existingEntry
+    });
+  } catch (error) {
+    console.error('Admin ecosystem/spend DELETE error:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to delete spending entry',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// POST /api/admin/ecosystem/spend/bulk - Bulk operations (delete multiple entries)
+router.post('/spend/bulk', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { action, ids, types } = req.body;
+    
+    if (!action || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Action and array of IDs are required'
+      });
+    }
+
+    if (action !== 'delete') {
+      return res.status(400).json({
+        success: false,
+        error: 'Only "delete" action is supported'
+      });
+    }
+
+    const supabase = getSupabaseAdminClient();
+    console.log('🗑️ Admin ecosystem/spend/bulk: Deleting entries:', { ids, types });
+    
+    let deletedEntries = [];
+    let totalDeleted = 0;
+
+    // Group IDs by type for efficient deletion
+    const entriesByType = {};
+    if (types && Array.isArray(types)) {
+      // If types are provided, group by type
+      ids.forEach((id, index) => {
+        const type = types[index] || 'expense';
+        if (!entriesByType[type]) {
+          entriesByType[type] = [];
+        }
+        entriesByType[type].push(id);
+      });
+    } else {
+      // Default to expense type if no types provided
+      entriesByType['expense'] = ids;
+    }
+
+    // Delete from spend_log table (expenses)
+    if (entriesByType['expense'] && entriesByType['expense'].length > 0) {
+      const { data: spendEntries, error: fetchSpendError } = await supabase
+        .from('spend_log')
+        .select('id, title, amount_sol, description')
+        .in('id', entriesByType['expense']);
+      
+      if (!fetchSpendError && spendEntries && spendEntries.length > 0) {
+        const { error: deleteSpendError } = await supabase
+          .from('spend_log')
+          .delete()
+          .in('id', entriesByType['expense']);
+        
+        if (deleteSpendError) {
+          console.error('Error deleting spend_log entries:', deleteSpendError);
+        } else {
+          deletedEntries.push(...spendEntries);
+          totalDeleted += spendEntries.length;
+          console.log(`✅ Deleted ${spendEntries.length} spend_log entries`);
+        }
+      }
+    }
+
+    // Delete from giveaway_payouts table (giveaways)
+    if (entriesByType['giveaway'] && entriesByType['giveaway'].length > 0) {
+      const { data: giveawayEntries, error: fetchGiveawayError } = await supabase
+        .from('giveaway_payouts')
+        .select('id, description, amount_sol, recipient_wallet')
+        .in('id', entriesByType['giveaway']);
+      
+      if (!fetchGiveawayError && giveawayEntries && giveawayEntries.length > 0) {
+        const { error: deleteGiveawayError } = await supabase
+          .from('giveaway_payouts')
+          .delete()
+          .in('id', entriesByType['giveaway']);
+        
+        if (deleteGiveawayError) {
+          console.error('Error deleting giveaway_payouts entries:', deleteGiveawayError);
+        } else {
+          deletedEntries.push(...giveawayEntries);
+          totalDeleted += giveawayEntries.length;
+          console.log(`✅ Deleted ${giveawayEntries.length} giveaway_payouts entries`);
+        }
+      }
+    }
+
+    // Delete from claim_links table (QR claims)
+    if (entriesByType['qr_claim'] && entriesByType['qr_claim'].length > 0) {
+      const { data: claimEntries, error: fetchClaimError } = await supabase
+        .from('claim_links')
+        .select('id, code, amount_lamports, claimer_address')
+        .in('id', entriesByType['qr_claim']);
+      
+      if (!fetchClaimError && claimEntries && claimEntries.length > 0) {
+        const { error: deleteClaimError } = await supabase
+          .from('claim_links')
+          .delete()
+          .in('id', entriesByType['qr_claim']);
+        
+        if (deleteClaimError) {
+          console.error('Error deleting claim_links entries:', deleteClaimError);
+        } else {
+          deletedEntries.push(...claimEntries);
+          totalDeleted += claimEntries.length;
+          console.log(`✅ Deleted ${claimEntries.length} claim_links entries`);
+        }
+      }
+    }
+
+    if (totalDeleted === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No entries found with the provided IDs'
+      });
+    }
+
+    console.log(`✅ Admin ecosystem/spend/bulk: Successfully deleted ${totalDeleted} entries total`);
+    return res.json({
+      success: true,
+      message: `Successfully deleted ${totalDeleted} entries`,
+      deleted_count: totalDeleted,
+      deleted_entries: deletedEntries,
+      deleted_by_type: {
+        expenses: entriesByType['expense']?.length || 0,
+        giveaways: entriesByType['giveaway']?.length || 0,
+        qr_claims: entriesByType['qr_claim']?.length || 0
+      }
+    });
+  } catch (error) {
+    console.error('Admin ecosystem/spend/bulk error:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to bulk delete spending entries',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 // GET /api/admin/ecosystem/content
 router.get('/content', async (req, res) => {
   try {
