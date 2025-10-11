@@ -19,10 +19,10 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/', (req, res) => {
   res.json({ 
     status: 'OK', 
-    message: 'WhatNext Backend API - Vercel Deployment',
+    message: 'WhatNext Backend API - Railway Deployment with ALL ADMIN ROUTES',
     timestamp: new Date().toISOString(),
-    platform: 'Vercel',
-    version: '1.0.1'
+    platform: 'Railway',
+    version: '2.0.0'
   });
 });
 
@@ -30,17 +30,60 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    platform: 'Vercel'
+    platform: 'Railway'
   });
 });
 
 app.get('/api', (req, res) => {
   res.json({
     message: 'WhatNext API is operational',
-    endpoints: ['/', '/health', '/api'],
+    endpoints: ['/', '/health', '/api', '/api/admin/ecosystem', '/api/admin/ecosystem/spend'],
     timestamp: new Date().toISOString()
   });
 });
+
+// Import and mount admin routes
+try {
+  // Mount admin routes first (before wildcard routes)
+  const adminRoutes = require('./admin/index.js');
+  app.use('/api/admin', adminRoutes);
+  console.log('✅ Loaded admin routes including ecosystem');
+} catch (error) {
+  console.error('❌ Failed to load admin routes:', error);
+}
+
+// Import other essential routes
+try {
+  const qrRoutes = require('./qr-codes.js');
+  app.use('/api/qr-codes', qrRoutes);
+  console.log('✅ Loaded QR codes routes');
+} catch (error) {
+  console.error('❌ Failed to load QR routes:', error);
+}
+
+try {
+  const statsRoutes = require('./stats.js');
+  app.use('/api/stats', statsRoutes);
+  console.log('✅ Loaded stats routes');
+} catch (error) {
+  console.error('❌ Failed to load stats routes:', error);
+}
+
+try {
+  const locationsRoutes = require('./locations.js');
+  app.use('/api/locations', locationsRoutes);
+  console.log('✅ Loaded locations routes');
+} catch (error) {
+  console.error('❌ Failed to load locations routes:', error);
+}
+
+try {
+  const ecosystemRoutes = require('./ecosystem/index.js');
+  app.use('/api/ecosystem', ecosystemRoutes);
+  console.log('✅ Loaded ecosystem routes');
+} catch (error) {
+  console.error('❌ Failed to load ecosystem routes:', error);
+}
 
 // Test database connection endpoint
 app.get('/api/test-db', async (req, res) => {
