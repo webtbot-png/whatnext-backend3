@@ -10,6 +10,12 @@ try {
   const spendRouter = require('./ecosystem/spend.js');
   router.use('/spend', spendRouter);
   console.log('✅ Loaded ecosystem/spend router with DELETE operations');
+  console.log('📋 Available spend routes:');
+  console.log('   GET    /api/admin/ecosystem/spend');
+  console.log('   POST   /api/admin/ecosystem/spend');
+  console.log('   DELETE /api/admin/ecosystem/spend/:id');
+  console.log('   DELETE /api/admin/ecosystem/spend/bulk');
+  console.log('   POST   /api/admin/ecosystem/spend/bulk');
 } catch (error) {
   console.error('❌ Failed to load ecosystem/spend router:', error);
 }
