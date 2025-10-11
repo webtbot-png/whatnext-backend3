@@ -28,7 +28,7 @@ router.get('/', async (req, res) => {
     let { data: giveaway, error: giveawayError } = await supabase
       .from('daily_giveaways')
       .select('*')
-      .eq('target_date', todayStr)
+      .eq('target_time', todayStr)
       .single();
 
     if (giveawayError && giveawayError.code !== 'PGRST116') {
@@ -40,7 +40,7 @@ router.get('/', async (req, res) => {
       const { data: newGiveaway, error: createError } = await supabase
         .from('daily_giveaways')
         .insert({
-          target_date: todayStr,
+          target_time: todayStr,
           prize_amount: 0.3,
           is_completed: false
         })
@@ -65,7 +65,7 @@ router.get('/', async (req, res) => {
     const { data: latestWinner, error: winnerError } = await supabase
       .from('giveaway_winners')
       .select('*')
-      .order('giveaway_date', { ascending: false })
+      .order('created_at', { ascending: false })
       .limit(1)
       .single();
 
@@ -132,7 +132,7 @@ router.post('/', async (req, res) => {
     const { data: giveaway, error: giveawayError } = await supabase
       .from('daily_giveaways')
       .select('*')
-      .eq('target_date', todayStr)
+      .eq('target_time', todayStr)
       .single();
 
     if (giveawayError) {
