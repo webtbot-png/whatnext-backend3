@@ -3,14 +3,6 @@ const { getSupabaseAdminClient  } = require('../../database.js');
 
 const router = express.Router();
 
-// Handle preflight requests for DELETE methods
-router.options('/*', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  res.sendStatus(200);
-});
-
 // Use existing SOL price function (simplified to avoid duplication)
 async function getCurrentSolPrice() {
   try {
@@ -311,115 +303,7 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/ecosystem/spend/bulk
- * Delete multiple spending entries
- */
-router.delete('/bulk', async (req, res) => {
-  try {
-    const { ids } = req.body;
-    
-    if (!ids || !Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid request',
-        message: 'Please provide an array of IDs to delete'
-      });
-    }
-
-    console.log(`🗑️ Bulk deleting ${ids.length} entries:`, ids);
-    const supabase = getSupabaseAdminClient();
-    
-    const deletedEntries = [];
-    const failedDeletions = [];
-
-    for (const id of ids) {
-      try {
-        let foundEntry = false;
-
-        // Try spend_log first
-        const { data: deletedSpend, error: spendError } = await supabase
-          .from('spend_log')
-          .delete()
-          .eq('id', id)
-          .select();
-
-        if (spendError && (spendError.message.includes('PGRST205') || spendError.message.includes('relation') || spendError.message.includes('does not exist'))) {
-          console.log('⚠️ spend_log table does not exist, skipping...');
-        } else if (!spendError && deletedSpend && deletedSpend.length > 0) {
-          deletedEntries.push({ id, type: 'spend_log', data: deletedSpend[0] });
-          foundEntry = true;
-        }
-
-        if (!foundEntry) {
-          // Try giveaway_payouts
-          const { data: deletedPayout, error: payoutError } = await supabase
-            .from('giveaway_payouts')
-            .delete()
-            .eq('id', id)
-            .select();
-
-          if (payoutError && (payoutError.message.includes('PGRST205') || payoutError.message.includes('relation') || payoutError.message.includes('does not exist'))) {
-            console.log('⚠️ giveaway_payouts table does not exist, skipping...');
-          } else if (!payoutError && deletedPayout && deletedPayout.length > 0) {
-            deletedEntries.push({ id, type: 'giveaway_payouts', data: deletedPayout[0] });
-            foundEntry = true;
-          }
-        }
-
-        if (!foundEntry) {
-          // Try claim_links
-          const actualId = id.startsWith('claim_') ? id.replace('claim_', '') : id;
-          const { data: deletedClaim, error: claimError } = await supabase
-            .from('claim_links')
-            .delete()
-            .eq('id', actualId)
-            .select();
-
-          if (claimError && (claimError.message.includes('PGRST205') || claimError.message.includes('relation') || claimError.message.includes('does not exist'))) {
-            console.log('⚠️ claim_links table does not exist, skipping...');
-          } else if (!claimError && deletedClaim && deletedClaim.length > 0) {
-            deletedEntries.push({ id, type: 'claim_links', data: deletedClaim[0] });
-            foundEntry = true;
-          }
-        }
-
-        // If we get here, the entry wasn't found in any table
-        if (!foundEntry) {
-          failedDeletions.push({ id, reason: 'Entry not found (database tables not configured)' });
-        }
-
-      } catch (entryError) {
-        console.error(`❌ Error deleting entry ${id}:`, entryError);
-        failedDeletions.push({ 
-          id, 
-          reason: entryError instanceof Error ? entryError.message : 'Unknown error' 
-        });
-      }
-    }
-
-    console.log(`✅ Bulk delete complete: ${deletedEntries.length} deleted, ${failedDeletions.length} failed`);
-
-    return res.json({
-      success: true,
-      message: `Bulk delete completed`,
-      results: {
-        deleted: deletedEntries.length,
-        failed: failedDeletions.length,
-        deletedEntries,
-        failedDeletions
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Unexpected error in bulk delete:', error);
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
+// NOTE: Bulk operations are admin-only and handled by /api/admin/ecosystem/spend/bulk
+// This public route has been removed to prevent route conflicts
 module.exports = router;
 
