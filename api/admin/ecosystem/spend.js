@@ -39,7 +39,12 @@ function verifyAdminToken(req) {
     throw new Error('Unauthorized');
   }
   const token = authHeader.substring(7);
-  jwt.verify(token, JWT_SECRET);
+  try {
+    jwt.verify(token, JWT_SECRET);
+  } catch (jwtError) {
+    console.log('JWT verification failed:', jwtError.message);
+    throw new Error('Unauthorized');
+  }
 }
 
 // Helper functions to reduce cognitive complexity
@@ -155,39 +160,44 @@ function createSpendingSummary(processedSpends, processedGiveaways, processedCla
 
 /**
  * GET /api/admin/ecosystem/spend
- * Get ecosystem spending data for admin dashboard
+ * Get ecosystem spending data for admin dashboard - RESTORED TO MATCH PUBLIC ENDPOINT
+ * Reads from ALL 3 tables: spend_log + giveaway_payouts + claim_links
  */
 router.get('/', async (req, res) => {
   try {
     verifyAdminToken(req);
-    console.log('🔍 Admin ecosystem/spend: Fetching spending data...');
+    console.log('🔍 Admin ecosystem/spend: Fetching spending data from ALL tables (spend_log + giveaway_payouts + claim_links)...');
     const supabase = getSupabaseAdminClient();
     
-    // Fetch all data in parallel
+    // Fetch all data in parallel (same as public endpoint)
     const [spendEntries, giveawayPayouts, qrClaims] = await Promise.all([
       fetchSpendEntries(supabase),
       fetchGiveawayPayouts(supabase),
       fetchQrClaims(supabase)
     ]);
 
-    // Process entries
+    // Process entries (same as before)
     const processedSpends = processSpendEntries(spendEntries);
     const processedGiveaways = processGiveawayEntries(giveawayPayouts);
     const processedClaims = processClaimEntries(qrClaims);
 
-    // Combine and sort all entries
+    // Combine and sort all entries (same as before)
     const allSpending = [...processedSpends, ...processedGiveaways, ...processedClaims]
       .sort((a, b) => new Date(b.spent_at).getTime() - new Date(a.spent_at).getTime());
 
-    // Create summary
+    // Create summary (same as before)
     const summary = createSpendingSummary(processedSpends, processedGiveaways, processedClaims, allSpending);
 
-    console.log(`✅ Admin ecosystem/spend: Retrieved ${allSpending.length} spending entries`);
+    console.log(`✅ Admin ecosystem/spend: Retrieved ${allSpending.length} spending entries from ALL tables`);
+    console.log(`   - spend_log: ${processedSpends.length} entries`);
+    console.log(`   - giveaway_payouts: ${processedGiveaways.length} entries`);
+    console.log(`   - claim_links: ${processedClaims.length} entries`);
+    
     return res.json({
       success: true,
       spending: allSpending,
       summary,
-      message: `Found ${allSpending.length} spending entries`
+      message: `Found ${allSpending.length} spending entries from all sources`
     });
     
   } catch (error) {
@@ -285,7 +295,8 @@ async function bulkDeleteFromTable(supabase, tableName, ids, selectFields) {
 
 /**
  * DELETE /api/admin/ecosystem/spend/:id
- * Delete a single spending entry (refactored for reduced complexity)
+ * Delete a single spending entry - WORKS WITH ALL 3 TABLES
+ * Searches spend_log + giveaway_payouts + claim_links (same as GET)
  */
 router.delete('/:id', async (req, res) => {
   try {
@@ -300,49 +311,74 @@ router.delete('/:id', async (req, res) => {
     }
 
     const supabase = getSupabaseAdminClient();
-    console.log('🗑️ Admin ecosystem/spend DELETE: Attempting to delete entry:', id);
+    console.log('🗑️ Admin ecosystem/spend DELETE: Searching all tables for entry:', id);
     
-    // Define table configurations for cleaner code
-    const tableConfigs = [
-      {
-        table: 'spend_log',
-        fields: 'id, title, amount_sol',
-        message: 'Successfully deleted spending entry',
-        responseMessage: 'Spending entry deleted successfully'
-      },
-      {
-        table: 'giveaway_payouts',
-        fields: 'id, description, amount_sol',
-        message: 'Successfully deleted giveaway payout',
-        responseMessage: 'Giveaway payout deleted successfully'
-      },
-      {
-        table: 'claim_links',
-        fields: 'id, code, amount_lamports',
-        message: 'Successfully deleted claim link',
-        responseMessage: 'Claim link deleted successfully'
-      }
-    ];
-
-    // Try deleting from each table in sequence
-    for (const config of tableConfigs) {
-      const result = await deleteFromTable(
-        supabase, 
-        config.table, 
-        id, 
-        config.fields, 
-        config.message
-      );
-      
-      if (result.success) {
-        return res.json(createSuccessResponse(config.responseMessage, result.entry));
-      }
+    // Handle claim IDs (remove 'claim_' prefix for database lookup)
+    const actualId = id.startsWith('claim_') ? id.replace('claim_', '') : id;
+    
+    // Try deleting from spend_log first
+    const result1 = await deleteFromTable(
+      supabase, 
+      'spend_log', 
+      id, 
+      'id, title, amount_sol', 
+      'Successfully deleted spending entry'
+    );
+    
+    if (result1.success) {
+      console.log('✅ Deleted from spend_log:', id);
+      return res.json({
+        success: true,
+        message: 'Spending entry deleted successfully',
+        deleted_entry: result1.entry,
+        table_source: 'spend_log'
+      });
     }
 
+    // Try deleting from giveaway_payouts
+    const result2 = await deleteFromTable(
+      supabase, 
+      'giveaway_payouts', 
+      id, 
+      'id, description, amount_sol', 
+      'Successfully deleted giveaway payout'
+    );
+    
+    if (result2.success) {
+      console.log('✅ Deleted from giveaway_payouts:', id);
+      return res.json({
+        success: true,
+        message: 'Giveaway payout deleted successfully',
+        deleted_entry: result2.entry,
+        table_source: 'giveaway_payouts'
+      });
+    }
+
+    // Try deleting from claim_links (use actualId without 'claim_' prefix)
+    const result3 = await deleteFromTable(
+      supabase, 
+      'claim_links', 
+      actualId, 
+      'id, code, amount_lamports', 
+      'Successfully deleted claim link'
+    );
+    
+    if (result3.success) {
+      console.log('✅ Deleted from claim_links:', actualId);
+      return res.json({
+        success: true,
+        message: 'Claim link deleted successfully',
+        deleted_entry: result3.entry,
+        table_source: 'claim_links'
+      });
+    }
+
+    console.log('❌ Entry not found in any table:', id);
     return res.status(404).json({
       success: false,
-      error: 'Spending entry not found'
+      error: 'Spending entry not found in any table (spend_log, giveaway_payouts, claim_links)'
     });
+
   } catch (error) {
     console.error('❌ Admin ecosystem/spend DELETE error:', error);
     if (error instanceof Error && (error.message === 'Unauthorized' || error.message.includes('invalid signature') || error.message.includes('jwt'))) {
