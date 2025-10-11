@@ -1,5 +1,5 @@
 const express = require('express');
-const { getSupabaseAdminClient } = require('../../database.js');
+const { getSupabaseAdminClient } = require('../../../database.js');
 const jwt = require('jsonwebtoken');
 
 const router = express.Router();
@@ -14,6 +14,117 @@ function verifyAdminToken(req) {
   jwt.verify(token, JWT_SECRET);
 }
 
+// Helper functions to reduce cognitive complexity
+
+async function fetchSpendEntries(supabase) {
+  const { data: spendEntries, error: spendError } = await supabase
+    .from('spend_log')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (spendError) {
+    console.error('Error fetching spend entries:', spendError);
+    throw spendError;
+  }
+  return spendEntries || [];
+}
+
+async function fetchGiveawayPayouts(supabase) {
+  const { data: giveawayPayouts, error: giveawayError } = await supabase
+    .from('giveaway_payouts')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (giveawayError) {
+    console.error('Error fetching giveaway payouts:', giveawayError);
+    console.log('Continuing without giveaway payouts data');
+    return [];
+  }
+  return giveawayPayouts || [];
+}
+
+async function fetchQrClaims(supabase) {
+  try {
+    const { data: claimData, error: claimError } = await supabase
+      .from('claim_links')
+      .select('*')
+      .eq('status', 'CLAIMED')
+      .order('created_at', { ascending: false });
+    if (claimError) {
+      console.log('Claims table not found or error:', claimError.message);
+      return [];
+    }
+    return claimData || [];
+  } catch (error) {
+    console.log('Claims table not available:', error);
+    return [];
+  }
+}
+
+function processSpendEntries(spendEntries) {
+  return spendEntries.map(spend => ({
+    id: spend.id,
+    title: spend.title || (spend.description ? spend.description.substring(0, 50) + '...' : ''),
+    amount_sol: spend.amount_sol || 0,
+    amount_usd: spend.amount_usd || null,
+    description: spend.description,
+    category: spend.category || 'expense',
+    transaction_hash: spend.transaction_hash,
+    transaction_verified: spend.transaction_verified || false,
+    spent_at: spend.spent_at || spend.created_at,
+    created_at: spend.created_at,
+    type: 'expense'
+  }));
+}
+
+function processGiveawayEntries(giveawayPayouts) {
+  return giveawayPayouts.map(payout => ({
+    id: payout.id,
+    title: `Giveaway: ${payout.description}`,
+    amount_sol: payout.amount_sol || 0,
+    amount_usd: payout.amount_usd || null,
+    description: payout.description,
+    category: 'giveaway',
+    transaction_hash: payout.transaction_hash,
+    recipient_wallet: payout.recipient_wallet,
+    payout_type: payout.payout_type,
+    spent_at: payout.paid_at || payout.created_at,
+    created_at: payout.created_at,
+    type: 'giveaway'
+  }));
+}
+
+function processClaimEntries(qrClaims) {
+  return qrClaims.map(claim => ({
+    id: claim.id,
+    title: `QR Claim: ${claim.code}`,
+    amount_sol: (claim.amount_lamports || 0) / 1000000000,
+    amount_usd: claim.amount_usd || null,
+    description: `QR Code claim: ${claim.code}`,
+    category: 'qr_claim',
+    transaction_hash: claim.tx_signature,
+    claimer_address: claim.claimer_address,
+    spent_at: claim.claimed_at || claim.created_at,
+    created_at: claim.created_at,
+    type: 'qr_claim'
+  }));
+}
+
+function createSpendingSummary(processedSpends, processedGiveaways, processedClaims, allSpending) {
+  const totalSpent = allSpending.reduce((sum, item) => sum + (item.amount_sol || 0), 0);
+  const totalUsdSpent = allSpending.reduce((sum, item) => sum + (item.amount_usd || 0), 0);
+
+  return {
+    total_entries: allSpending.length,
+    total_sol_spent: totalSpent,
+    total_usd_spent: totalUsdSpent,
+    categories: {
+      expenses: processedSpends.length,
+      giveaways: processedGiveaways.length,
+      qr_claims: processedClaims.length
+    },
+    recent_spending: allSpending.slice(0, 10)
+  };
+}
+
 /**
  * GET /api/admin/ecosystem/spend
  * Get ecosystem spending data for admin dashboard
@@ -24,104 +135,24 @@ router.get('/', async (req, res) => {
     console.log('🔍 Admin ecosystem/spend: Fetching spending data...');
     const supabase = getSupabaseAdminClient();
     
-    // Fetch spending entries from spend_log
-    const { data: spendEntries, error: spendError } = await supabase
-      .from('spend_log')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (spendError) {
-      console.error('Error fetching spend entries:', spendError);
-      throw spendError;
-    }
+    // Fetch all data in parallel
+    const [spendEntries, giveawayPayouts, qrClaims] = await Promise.all([
+      fetchSpendEntries(supabase),
+      fetchGiveawayPayouts(supabase),
+      fetchQrClaims(supabase)
+    ]);
 
-    // Fetch giveaway payouts
-    const { data: giveawayPayouts, error: giveawayError } = await supabase
-      .from('giveaway_payouts')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if (giveawayError) {
-      console.error('Error fetching giveaway payouts:', giveawayError);
-      console.log('Continuing without giveaway payouts data');
-    }
+    // Process entries
+    const processedSpends = processSpendEntries(spendEntries);
+    const processedGiveaways = processGiveawayEntries(giveawayPayouts);
+    const processedClaims = processClaimEntries(qrClaims);
 
-    // Fetch QR claims
-    let qrClaims = [];
-    try {
-      const { data: claimData, error: claimError } = await supabase
-        .from('claim_links')
-        .select('*')
-        .eq('status', 'CLAIMED')
-        .order('created_at', { ascending: false });
-      if (claimError) {
-        console.log('Claims table not found or error:', claimError.message);
-      } else {
-        qrClaims = claimData || [];
-      }
-    } catch (error) {
-      console.log('Claims table not available:', error);
-    }
-
-    // Process and combine all entries (same as ecosystem.js logic)
-    const processedSpends = (spendEntries || []).map(spend => ({
-      id: spend.id,
-      title: spend.title || (spend.description ? spend.description.substring(0, 50) + '...' : ''),
-      amount_sol: spend.amount_sol || 0,
-      amount_usd: spend.amount_usd || null,
-      description: spend.description,
-      category: spend.category || 'expense',
-      transaction_hash: spend.transaction_hash,
-      transaction_verified: spend.transaction_verified || false,
-      spent_at: spend.spent_at || spend.created_at,
-      created_at: spend.created_at,
-      type: 'expense'
-    }));
-
-    const processedGiveaways = (giveawayPayouts || []).map(payout => ({
-      id: payout.id,
-      title: `Giveaway: ${payout.description}`,
-      amount_sol: payout.amount_sol || 0,
-      amount_usd: payout.amount_usd || null,
-      description: payout.description,
-      category: 'giveaway',
-      transaction_hash: payout.transaction_hash,
-      recipient_wallet: payout.recipient_wallet,
-      payout_type: payout.payout_type,
-      spent_at: payout.paid_at || payout.created_at,
-      created_at: payout.created_at,
-      type: 'giveaway'
-    }));
-
-    const processedClaims = qrClaims.map(claim => ({
-      id: claim.id,
-      title: `QR Claim: ${claim.code}`,
-      amount_sol: (claim.amount_lamports || 0) / 1000000000,
-      amount_usd: claim.amount_usd || null,
-      description: `QR Code claim: ${claim.code}`,
-      category: 'qr_claim',
-      transaction_hash: claim.tx_signature,
-      claimer_address: claim.claimer_address,
-      spent_at: claim.claimed_at || claim.created_at,
-      created_at: claim.created_at,
-      type: 'qr_claim'
-    }));
-
+    // Combine and sort all entries
     const allSpending = [...processedSpends, ...processedGiveaways, ...processedClaims]
       .sort((a, b) => new Date(b.spent_at).getTime() - new Date(a.spent_at).getTime());
 
-    const totalSpent = allSpending.reduce((sum, item) => sum + (item.amount_sol || 0), 0);
-    const totalUsdSpent = allSpending.reduce((sum, item) => sum + (item.amount_usd || 0), 0);
-
-    const summary = {
-      total_entries: allSpending.length,
-      total_sol_spent: totalSpent,
-      total_usd_spent: totalUsdSpent,
-      categories: {
-        expenses: processedSpends.length,
-        giveaways: processedGiveaways.length,
-        qr_claims: processedClaims.length
-      },
-      recent_spending: allSpending.slice(0, 10)
-    };
+    // Create summary
+    const summary = createSpendingSummary(processedSpends, processedGiveaways, processedClaims, allSpending);
 
     console.log(`✅ Admin ecosystem/spend: Retrieved ${allSpending.length} spending entries`);
     return res.json({
@@ -400,67 +431,103 @@ router.get('/bulk', async (req, res) => {
   }
 });
 
+// Helper functions for bulk operations
+
+function validateBulkRequest(action, ids) {
+  if (!action || !Array.isArray(ids) || ids.length === 0) {
+    return { valid: false, error: 'Action and array of IDs are required' };
+  }
+  if (action !== 'delete') {
+    return { valid: false, error: 'Only "delete" action is supported' };
+  }
+  return { valid: true };
+}
+
+function getTableConfigurations() {
+  return [
+    { table: 'spend_log', fields: 'id, title, amount_sol, description' },
+    { table: 'giveaway_payouts', fields: 'id, description, amount_sol, recipient_wallet' },
+    { table: 'claim_links', fields: 'id, code, amount_lamports, claimer_address' }
+  ];
+}
+
+async function attemptDeleteFromTables(supabase, id, tableConfigs, deletedByType) {
+  for (const config of tableConfigs) {
+    try {
+      const result = await deleteFromTable(
+        supabase, 
+        config.table, 
+        id, 
+        config.fields, 
+        `Bulk deleted from ${config.table}`
+      );
+      
+      if (result.success) {
+        deletedByType[config.table]++;
+        console.log(`✅ Deleted ID ${id} from ${config.table}`);
+        return { success: true, entry: result.entry };
+      }
+    } catch (error) {
+      console.log(`❌ Failed to delete ID ${id} from ${config.table}:`, error.message);
+    }
+  }
+  return { success: false, entry: null };
+}
+
+function createBulkDeleteResponse(totalDeleted, deletedEntries, deletedByType) {
+  return {
+    success: true,
+    message: `Successfully deleted ${totalDeleted} entries`,
+    deleted_count: totalDeleted,
+    deleted_entries: deletedEntries,
+    deleted_by_type: {
+      expenses: deletedByType.spend_log,
+      giveaways: deletedByType.giveaway_payouts,
+      qr_claims: deletedByType.claim_links
+    }
+  };
+}
+
 /**
  * POST /api/admin/ecosystem/spend/bulk - Bulk operations (delete multiple entries)
  */
 router.post('/bulk', async (req, res) => {
   try {
     verifyAdminToken(req);
-    const { action, ids, types } = req.body;
+    const { action, ids } = req.body;
     
-    if (!action || !Array.isArray(ids) || ids.length === 0) {
+    // Validate request
+    const validation = validateBulkRequest(action, ids);
+    if (!validation.valid) {
       return res.status(400).json({
         success: false,
-        error: 'Action and array of IDs are required'
-      });
-    }
-
-    if (action !== 'delete') {
-      return res.status(400).json({
-        success: false,
-        error: 'Only "delete" action is supported'
+        error: validation.error
       });
     }
 
     const supabase = getSupabaseAdminClient();
-    console.log('�️ Admin ecosystem/spend/bulk: Deleting entries:', { ids, types });
+    console.log('🗑️ Admin ecosystem/spend/bulk: Deleting entries:', { ids });
     
-    // Group IDs by type for efficient deletion
-    const entriesByType = groupIdsByType(ids, types);
-    
-    let deletedEntries = [];
+    const deletedEntries = [];
     let totalDeleted = 0;
+    const deletedByType = {
+      spend_log: 0,
+      giveaway_payouts: 0,
+      claim_links: 0
+    };
 
-    // Define table configurations for bulk operations
-    const bulkTableConfigs = [
-      { 
-        type: 'expense', 
-        table: 'spend_log', 
-        fields: 'id, title, amount_sol, description' 
-      },
-      { 
-        type: 'giveaway', 
-        table: 'giveaway_payouts', 
-        fields: 'id, description, amount_sol, recipient_wallet' 
-      },
-      { 
-        type: 'qr_claim', 
-        table: 'claim_links', 
-        fields: 'id, code, amount_lamports, claimer_address' 
-      }
-    ];
-
-    // Process each table type
-    for (const config of bulkTableConfigs) {
-      const result = await bulkDeleteFromTable(
-        supabase,
-        config.table,
-        entriesByType[config.type],
-        config.fields
-      );
+    const tableConfigs = getTableConfigurations();
+    
+    // Process each ID
+    for (const id of ids) {
+      const deleteResult = await attemptDeleteFromTables(supabase, id, tableConfigs, deletedByType);
       
-      deletedEntries.push(...result.deletedEntries);
-      totalDeleted += result.count;
+      if (deleteResult.success) {
+        deletedEntries.push(deleteResult.entry);
+        totalDeleted++;
+      } else {
+        console.log(`⚠️ ID ${id} not found in any table`);
+      }
     }
 
     if (totalDeleted === 0) {
@@ -471,17 +538,10 @@ router.post('/bulk', async (req, res) => {
     }
 
     console.log(`✅ Admin ecosystem/spend/bulk: Successfully deleted ${totalDeleted} entries total`);
-    return res.json({
-      success: true,
-      message: `Successfully deleted ${totalDeleted} entries`,
-      deleted_count: totalDeleted,
-      deleted_entries: deletedEntries,
-      deleted_by_type: {
-        expenses: entriesByType['expense']?.length || 0,
-        giveaways: entriesByType['giveaway']?.length || 0,
-        qr_claims: entriesByType['qr_claim']?.length || 0
-      }
-    });
+    console.log('Deletion summary:', deletedByType);
+    
+    return res.json(createBulkDeleteResponse(totalDeleted, deletedEntries, deletedByType));
+    
   } catch (error) {
     console.error('Admin ecosystem/spend/bulk error:', error);
     if (error instanceof Error && error.message === 'Unauthorized') {
