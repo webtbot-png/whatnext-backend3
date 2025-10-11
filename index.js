@@ -97,7 +97,6 @@ const getRouteDefinitions = () => {
     { path: '/api/admin/add-password', file: './api/admin/add-password.js' },
     { path: '/api/admin/analytics', file: './api/admin/analytics.js' },
     { path: '/api/admin/api-config', file: './api/admin/api-config.js' },
-    { path: '/api/admin/claims', file: './api/admin/claims.js' },
     { path: '/api/admin/content', file: './api/admin/content.js' },
     { path: '/api/admin/dashboard', file: './api/admin/dashboard.js' },
     { path: '/api/admin/force-populate-settings', file: './api/admin/force-populate-settings.js' },
