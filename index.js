@@ -11,10 +11,7 @@ initializeDatabase().catch(console.error);
 // Middleware - FIXED CORS to allow Railway and production domains
 app.use(cors({
   origin: [
-    'http://localhost:3000',
-    'http://localhost:5173',
     'https://whatnext.fun',
-    'https://www.whatnext.fun',
     'https://whatnext-backend3-production.up.railway.app'
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
