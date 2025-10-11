@@ -8,17 +8,31 @@ const PORT = process.env.PORT || 3000;
 // Initialize database
 initializeDatabase().catch(console.error);
 
-// Middleware
+// Middleware - FIXED CORS to allow Railway and production domains
 app.use(cors({
   origin: [
     'http://localhost:3000',
     'http://localhost:5173',
-    'https://whatnext.fun'
+    'https://whatnext.fun',
+    'https://www.whatnext.fun',
+    'https://whatnext-backend3-production.up.railway.app'
   ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Add explicit DELETE method debugging middleware
+app.use((req, res, next) => {
+  if (req.method === 'DELETE') {
+    console.log(`🔍 DELETE Request: ${req.method} ${req.originalUrl}`);
+    console.log(`🔍 Headers:`, req.headers);
+    console.log(`🔍 Body:`, req.body);
+  }
+  next();
+});
 
 // Health check
 app.get('/', (req, res) => {
@@ -84,21 +98,22 @@ const getRouteDefinitions = () => {
     { path: '/api/claim-validation', file: './api/claim-validation.js' },
     { path: '/api/debug', file: './api/debug.js' },
     
-    // Directory routes with index files
+    // Directory routes with index files (these mount sub-routers automatically)
     { path: '/api/admin', file: './api/admin/index.js' },
     { path: '/api/analytics', file: './api/analytics/index.js' },
+    { path: '/api/ecosystem', file: './api/ecosystem/index.js' },  // Public ecosystem routes
     { path: '/api/pumpfun', file: './api/pumpfun/index.js' },
     { path: '/api/settings', file: './api/settings/index.js' },
     { path: '/api/social', file: './api/social/index.js' },
     
-    // Individual subdirectory files
+    // Individual subdirectory files (REMOVED CONFLICTING ecosystem route)
     { path: '/api/admin/add-password', file: './api/admin/add-password.js' },
     { path: '/api/admin/analytics', file: './api/admin/analytics.js' },
     { path: '/api/admin/api-config', file: './api/admin/api-config.js' },
     { path: '/api/admin/claims', file: './api/admin/claims.js' },
     { path: '/api/admin/content', file: './api/admin/content.js' },
     { path: '/api/admin/dashboard', file: './api/admin/dashboard.js' },
-    { path: '/api/admin/ecosystem', file: './api/admin/ecosystem.js' },
+    // REMOVED: { path: '/api/admin/ecosystem', file: './api/admin/ecosystem.js' }, // This is handled by /api/admin index
     { path: '/api/admin/force-populate-settings', file: './api/admin/force-populate-settings.js' },
     { path: '/api/admin/giveaway', file: './api/admin/giveaway.js' },
     { path: '/api/admin/giveaway-payout', file: './api/admin/giveaway-payout.js' },
@@ -131,14 +146,15 @@ const getRouteDefinitions = () => {
     { path: '/api/analytics/track-visitor', file: './api/analytics/track-visitor.js' },
     { path: '/api/analytics/update-pageview', file: './api/analytics/update-pageview.js' },
     
-    // Other specific routes
+    // Other specific routes (REMOVED conflicting ecosystem routes - they're handled by /api/admin/ecosystem)
     { path: '/api/bunny-net', file: './api/bunny-net/bunny.js' },
     { path: '/api/claim/validate', file: './api/claim/validate.js' },
-    { path: '/api/ecosystem/data', file: './api/ecosystem/data.js' },
-    { path: '/api/ecosystem/fees', file: './api/ecosystem/fees.js' },
-    { path: '/api/ecosystem/pumpfun-fees', file: './api/ecosystem/pumpfun-fees.js' },
-    { path: '/api/ecosystem/spend', file: './api/ecosystem/spend.js' },
-    { path: '/api/ecosystem/wallet', file: './api/ecosystem/wallet.js' },
+    // REMOVED CONFLICTING ECOSYSTEM ROUTES - these are now handled by /api/admin/ecosystem
+    // { path: '/api/ecosystem/data', file: './api/ecosystem/data.js' },
+    // { path: '/api/ecosystem/fees', file: './api/ecosystem/fees.js' },
+    // { path: '/api/ecosystem/pumpfun-fees', file: './api/ecosystem/pumpfun-fees.js' },
+    // { path: '/api/ecosystem/spend', file: './api/ecosystem/spend.js' },
+    // { path: '/api/ecosystem/wallet', file: './api/ecosystem/wallet.js' },
     { path: '/api/giveaway/winners', file: './api/giveaway/winners.js' },
     { path: '/api/media/track-view', file: './api/media/track-view.js' },
     { path: '/api/pumpfun/data', file: './api/pumpfun/data.js' },
