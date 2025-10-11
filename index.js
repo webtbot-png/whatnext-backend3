@@ -99,7 +99,6 @@ const getRouteDefinitions = () => {
     { path: '/api/admin/claims', file: './api/admin/claims.js' },
     { path: '/api/admin/content', file: './api/admin/content.js' },
     { path: '/api/admin/dashboard', file: './api/admin/dashboard.js' },
-    { path: '/api/admin/ecosystem', file: './api/admin/ecosystem.js' },
     { path: '/api/admin/force-populate-settings', file: './api/admin/force-populate-settings.js' },
     { path: '/api/admin/giveaway', file: './api/admin/giveaway.js' },
     { path: '/api/admin/giveaway-payout', file: './api/admin/giveaway-payout.js' },
