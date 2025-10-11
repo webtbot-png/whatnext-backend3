@@ -2,6 +2,109 @@ const express = require('express');
 const { getSupabaseAdminClient  } = require('../database.js');
 const router = express.Router();
 
+/**
+ * GET /api/qr-codes
+ * Get all QR codes for admin dashboard
+ */
+router.get('/', async (req, res) => {
+  try {
+    console.log('🔍 Fetching all QR codes for dashboard...');
+    const supabase = getSupabaseAdminClient();
+    
+    // Fetch all claim links (QR codes) from the database
+    const { data: claimLinks, error } = await supabase
+      .from('claim_links')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('❌ Database error fetching claim links:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to fetch QR codes',
+        details: error.message
+      });
+    }
+
+    console.log(`✅ Found ${claimLinks?.length || 0} QR codes in database`);
+
+    // Fetch live SOL price for USD conversions
+    let solPrice = 210; // Fallback price
+    try {
+      const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+      if (response.ok) {
+        const data = await response.json();
+        solPrice = data.solana?.usd || 210;
+      }
+    } catch (err) {
+      console.warn('⚠️ Using fallback SOL price:', solPrice);
+    }
+
+    // Process and format the QR codes data
+    const qrCodes = (claimLinks || []).map((claim) => {
+      const isExpired = new Date() > new Date(claim.expires_at);
+      let status = 'ACTIVE';
+      if (claim.claimed_at) {
+        status = 'CLAIMED';
+      } else if (isExpired) {
+        status = 'EXPIRED';
+      }
+
+      // Convert lamports to SOL
+      const solAmount = claim.amount_lamports ? (claim.amount_lamports / 1000000000) : 0;
+      const usdAmount = claim.amount_usd || (solAmount * solPrice);
+
+      return {
+        id: claim.id,
+        code: claim.code,
+        amount: solAmount,
+        amount_sol: solAmount,
+        amount_usd: usdAmount,
+        amount_lamports: claim.amount_lamports || 0,
+        currency: 'SOL',
+        status,
+        description: claim.description || claim.note || `QR Code: ${claim.code}`,
+        created_at: claim.created_at,
+        expires_at: claim.expires_at,
+        claimed_at: claim.claimed_at,
+        claimed_by: claim.claimed_by_wallet || claim.claimer_address,
+        location_id: claim.location_id,
+        tx_signature: claim.tx_signature,
+        display_amount: `${solAmount.toFixed(6)} SOL ($${usdAmount.toFixed(2)})`
+      };
+    });
+
+    // Calculate totals
+    const totalAmount = qrCodes.reduce((sum, qr) => sum + (qr.amount || 0), 0);
+    const activeCodes = qrCodes.filter(qr => qr.status === 'ACTIVE');
+    const claimedCodes = qrCodes.filter(qr => qr.status === 'CLAIMED');
+    const expiredCodes = qrCodes.filter(qr => qr.status === 'EXPIRED');
+
+    console.log(`✅ Returning ${qrCodes.length} QR codes (${activeCodes.length} active, ${claimedCodes.length} claimed)`);
+
+    res.json({
+      success: true,
+      qr_codes: qrCodes,
+      totals: {
+        total_codes: qrCodes.length,
+        active_codes: activeCodes.length,
+        claimed_codes: claimedCodes.length,
+        expired_codes: expiredCodes.length,
+        total_amount_sol: totalAmount,
+        total_amount_usd: totalAmount * solPrice
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('❌ Server error fetching QR codes:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 router.post('/', async (req, res) => {
   try {
     const { code, email, claimCode } = req.body;
