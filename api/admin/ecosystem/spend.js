@@ -282,10 +282,14 @@ router.get('/', async (req, res) => {
     return res.json({
       success: true,
       entries: combinedEntries,
+      count: combinedEntries.length, // Add this for frontend compatibility
+      total: combinedEntries.length, // Add this too in case frontend looks for 'total'
+      spendCount: combinedEntries.length, // Add this in case frontend looks for 'spendCount'
       totals: {
         spendCount: spendEntries.length,
         payoutCount: payoutEntries.length,
-        claimCount: claimedEntries.length
+        claimCount: claimedEntries.length,
+        totalEntries: combinedEntries.length // Add total entries here too
       },
       timestamp: new Date().toISOString()
     });
