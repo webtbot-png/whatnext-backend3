@@ -1,16 +1,23 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../../database.js');
+const jwt = require('jsonwebtoken');
 
 const router = express.Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
+
+function verifyAdminToken(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    throw new Error('Unauthorized');
+  }
+  const token = authHeader.substring(7);
+  jwt.verify(token, JWT_SECRET);
+}
 
 // GET - Dashboard statistics and overview
 router.get('/', async (req, res) => {
   try {
-    // Add basic auth check
-    const authHeader = req.headers.authorization;
-    if (!authHeader) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    verifyAdminToken(req);
 
     const supabase = getSupabaseAdminClient();
 
@@ -130,6 +137,13 @@ router.get('/', async (req, res) => {
 
   } catch (error) {
     console.error('Dashboard error:', error);
+    if (error instanceof Error && (error.message === 'Unauthorized' || error.message.includes('invalid signature') || error.message.includes('jwt'))) {
+      return res.status(401).json({ 
+        success: false,
+        error: 'Unauthorized - Please log in again',
+        message: 'JWT token is invalid or expired'
+      });
+    }
     return res.status(500).json({
       success: false,
       error: 'Failed to load dashboard'
