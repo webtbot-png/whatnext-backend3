@@ -5,6 +5,34 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
 
+// Health check endpoint for spend router
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Ecosystem spend router is operational',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      'GET /': 'List all spending entries',
+      'POST /': 'Create new spending entry', 
+      'DELETE /:id': 'Delete single spending entry',
+      'DELETE /bulk': 'Bulk delete spending entries',
+      'POST /bulk': 'Bulk operations (legacy support)',
+      'GET /bulk': 'Bulk operations info'
+    }
+  });
+});
+
+// Test endpoint for DELETE method routing
+router.get('/test-delete/:id', (req, res) => {
+  res.json({
+    success: true,
+    message: 'DELETE route handler is accessible',
+    received_id: req.params.id,
+    method: req.method,
+    note: 'This confirms the DELETE /:id route is properly registered'
+  });
+});
+
 function verifyAdminToken(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
@@ -272,7 +300,7 @@ router.delete('/:id', async (req, res) => {
     }
 
     const supabase = getSupabaseAdminClient();
-    console.log('�️ Admin ecosystem/spend: Deleting spending entry:', id);
+    console.log('🗑️ Admin ecosystem/spend DELETE: Attempting to delete entry:', id);
     
     // Define table configurations for cleaner code
     const tableConfigs = [
@@ -316,9 +344,12 @@ router.delete('/:id', async (req, res) => {
       error: 'Spending entry not found'
     });
   } catch (error) {
-    console.error('Admin ecosystem/spend DELETE error:', error);
+    console.error('❌ Admin ecosystem/spend DELETE error:', error);
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
+      return res.status(401).json({ 
+        success: false,
+        error: 'Unauthorized' 
+      });
     }
     return res.status(500).json({
       success: false,
@@ -489,24 +520,23 @@ function createBulkDeleteResponse(totalDeleted, deletedEntries, deletedByType) {
 }
 
 /**
- * POST /api/admin/ecosystem/spend/bulk - Bulk operations (delete multiple entries)
+ * DELETE /api/admin/ecosystem/spend/bulk - Bulk delete operations (supports DELETE method)
  */
-router.post('/bulk', async (req, res) => {
+router.delete('/bulk', async (req, res) => {
   try {
     verifyAdminToken(req);
-    const { action, ids } = req.body;
+    const { ids } = req.body;
     
     // Validate request
-    const validation = validateBulkRequest(action, ids);
-    if (!validation.valid) {
+    if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({
         success: false,
-        error: validation.error
+        error: 'Array of IDs is required for bulk delete'
       });
     }
 
     const supabase = getSupabaseAdminClient();
-    console.log('🗑️ Admin ecosystem/spend/bulk: Deleting entries:', { ids });
+    console.log('🗑️ Admin ecosystem/spend/bulk DELETE: Deleting entries:', { ids });
     
     const deletedEntries = [];
     let totalDeleted = 0;
@@ -537,13 +567,80 @@ router.post('/bulk', async (req, res) => {
       });
     }
 
-    console.log(`✅ Admin ecosystem/spend/bulk: Successfully deleted ${totalDeleted} entries total`);
+    console.log(`✅ Admin ecosystem/spend/bulk DELETE: Successfully deleted ${totalDeleted} entries total`);
     console.log('Deletion summary:', deletedByType);
     
     return res.json(createBulkDeleteResponse(totalDeleted, deletedEntries, deletedByType));
     
   } catch (error) {
-    console.error('Admin ecosystem/spend/bulk error:', error);
+    console.error('Admin ecosystem/spend/bulk DELETE error:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to bulk delete spending entries',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * POST /api/admin/ecosystem/spend/bulk - Bulk operations (backward compatibility)
+ */
+router.post('/bulk', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { action, ids } = req.body;
+    
+    // Validate request
+    const validation = validateBulkRequest(action, ids);
+    if (!validation.valid) {
+      return res.status(400).json({
+        success: false,
+        error: validation.error
+      });
+    }
+
+    const supabase = getSupabaseAdminClient();
+    console.log('🗑️ Admin ecosystem/spend/bulk POST: Deleting entries:', { ids });
+    
+    const deletedEntries = [];
+    let totalDeleted = 0;
+    const deletedByType = {
+      spend_log: 0,
+      giveaway_payouts: 0,
+      claim_links: 0
+    };
+
+    const tableConfigs = getTableConfigurations();
+    
+    // Process each ID
+    for (const id of ids) {
+      const deleteResult = await attemptDeleteFromTables(supabase, id, tableConfigs, deletedByType);
+      
+      if (deleteResult.success) {
+        deletedEntries.push(deleteResult.entry);
+        totalDeleted++;
+      } else {
+        console.log(`⚠️ ID ${id} not found in any table`);
+      }
+    }
+
+    if (totalDeleted === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No entries found with the provided IDs'
+      });
+    }
+
+    console.log(`✅ Admin ecosystem/spend/bulk POST: Successfully deleted ${totalDeleted} entries total`);
+    console.log('Deletion summary:', deletedByType);
+    
+    return res.json(createBulkDeleteResponse(totalDeleted, deletedEntries, deletedByType));
+    
+  } catch (error) {
+    console.error('Admin ecosystem/spend/bulk POST error:', error);
     if (error instanceof Error && error.message === 'Unauthorized') {
       return res.status(401).json({ error: 'Unauthorized' });
     }
