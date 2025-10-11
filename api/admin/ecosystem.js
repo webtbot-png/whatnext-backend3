@@ -5,6 +5,15 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
 
+// Mount debug router for Railway troubleshooting
+try {
+  const debugRouter = require('./railway-debug.js');
+  router.use('/debug', debugRouter);
+  console.log('✅ Loaded Railway debug router at /api/admin/ecosystem/debug');
+} catch (error) {
+  console.error('❌ Failed to load debug router:', error);
+}
+
 // Mount the complete spend router with ALL CRUD operations
 try {
   const spendRouter = require('./ecosystem/spend.js');
@@ -22,14 +31,28 @@ try {
 
 function verifyAdminToken(req) {
   const authHeader = req.headers.authorization;
+  console.log('🔐 Auth Header Check:', { 
+    hasAuthHeader: !!authHeader, 
+    headerPrefix: authHeader?.substring(0, 10),
+    jwtSecret: JWT_SECRET ? 'SET' : 'NOT_SET',
+    environment: process.env.NODE_ENV || 'development'
+  });
+  
   if (!authHeader?.startsWith('Bearer ')) {
+    console.log('❌ Missing or invalid Bearer token format');
     throw new Error('Unauthorized');
   }
   const token = authHeader.substring(7);
   try {
     jwt.verify(token, JWT_SECRET);
+    console.log('✅ JWT verification successful');
   } catch (jwtError) {
-    console.log('JWT verification failed:', jwtError.message);
+    console.log('❌ JWT verification failed:', jwtError.message);
+    console.log('🔍 JWT Details:', {
+      tokenLength: token.length,
+      secretLength: JWT_SECRET.length,
+      errorType: jwtError.name
+    });
     throw new Error('Unauthorized');
   }
 }
