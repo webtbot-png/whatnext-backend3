@@ -1,57 +1,128 @@
 const express = require('express');
-const router = express.Router();
+const cors = require('cors');
 
-// Debug middleware to log all admin requests
-router.use((req, res, next) => {
-  console.log(`🔍 Admin Route: ${req.method} ${req.originalUrl}`);
-  next();
-});
+// Create Express app
+const app = express();
 
-// Mount all admin routes
-try {
-  router.use('/login', require('./login.js'));
-  router.use('/dashboard', require('./dashboard.js'));
-  router.use('/users', require('./users.js'));
-  router.use('/settings', require('./settings.js'));
-  router.use('/analytics', require('./analytics.js'));
-  router.use('/content', require('./content.js'));
-  router.use('/media', require('./media.js'));
-  router.use('/upload', require('./upload.js'));
-  router.use('/giveaway', require('./giveaway.js'));
-  router.use('/giveaway-process', require('./giveaway-process.js'));
-  router.use('/giveaway-payout', require('./giveaway-payout.js'));
-  router.use('/claims', require('./claims.js'));
-  router.use('/stats', require('./stats.js'));
-  router.use('/roadmap', require('./roadmap.js'));
-  router.use('/schedules', require('./schedules.js'));
-  router.use('/locations', require('./locations.js'));
-  router.use('/social', require('./social.js'));
-  router.use('/ecosystem', require('./ecosystem.js'));
-  console.log('✅ Mounted admin ecosystem router at /api/admin/ecosystem');
-  router.use('/pumpfun', require('./pumpfun.js'));
-  router.use('/live-stream', require('./live-stream.js'));
-  router.use('/toggle-live', require('./toggle-live.js'));
-  router.use('/add-password', require('./add-password.js'));
-  router.use('/api-config', require('./api-config.js'));
-  router.use('/populate-settings', require('./populate-settings.js'));
-  router.use('/force-populate-settings', require('./force-populate-settings.js'));
-  
-  console.log('✅ All admin routes loaded');
-} catch (error) {
-  console.log('⚠️ Some admin routes failed to load:', error.message);
-}
+// CORS configuration
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
-// Health check for admin
-router.get('/', (req, res) => {
-  res.json({
-    message: 'Admin API operational',
+// Body parsing middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Basic health check
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'WhatNext Backend API - Railway Deployment with ALL ADMIN ROUTES',
     timestamp: new Date().toISOString(),
-    availableEndpoints: [
-      '/login', '/dashboard', '/users', '/settings', '/analytics',
-      '/content', '/media', '/upload', '/giveaway', '/claims', '/stats',
-      '/ecosystem', '/ecosystem/spend'
-    ]
+    platform: 'Railway',
+    version: '2.0.0'
   });
 });
 
-module.exports = router;
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    platform: 'Railway'
+  });
+});
+
+app.get('/api', (req, res) => {
+  res.json({
+    message: 'WhatNext API is operational',
+    endpoints: ['/', '/health', '/api', '/api/admin/ecosystem', '/api/admin/ecosystem/spend'],
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Import and mount admin routes
+try {
+  // Mount admin routes first (before wildcard routes)
+  const adminRoutes = require('./admin/index.js');
+  app.use('/api/admin', adminRoutes);
+  console.log('✅ Loaded admin routes including ecosystem');
+} catch (error) {
+  console.error('❌ Failed to load admin routes:', error);
+}
+
+// Import other essential routes
+try {
+  const qrRoutes = require('./qr-codes.js');
+  app.use('/api/qr-codes', qrRoutes);
+  console.log('✅ Loaded QR codes routes');
+} catch (error) {
+  console.error('❌ Failed to load QR routes:', error);
+}
+
+try {
+  const statsRoutes = require('./stats.js');
+  app.use('/api/stats', statsRoutes);
+  console.log('✅ Loaded stats routes');
+} catch (error) {
+  console.error('❌ Failed to load stats routes:', error);
+}
+
+try {
+  const locationsRoutes = require('./locations.js');
+  app.use('/api/locations', locationsRoutes);
+  console.log('✅ Loaded locations routes');
+} catch (error) {
+  console.error('❌ Failed to load locations routes:', error);
+}
+
+try {
+  const ecosystemRoutes = require('./ecosystem/index.js');
+  app.use('/api/ecosystem', ecosystemRoutes);
+  console.log('✅ Loaded ecosystem routes');
+} catch (error) {
+  console.error('❌ Failed to load ecosystem routes:', error);
+}
+
+// Test database connection endpoint
+app.get('/api/test-db', async (req, res) => {
+  try {
+    // Basic test without complex imports
+    res.json({
+      status: 'Database connection test',
+      environment: {
+        hasSupabaseUrl: !!process.env.SUPABASE_URL,
+        hasSupabaseKey: !!process.env.SUPABASE_ANON_KEY,
+        nodeEnv: process.env.NODE_ENV
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: 'Database test failed',
+      message: error.message
+    });
+  }
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ 
+    error: 'Internal Server Error',
+    message: err.message,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ 
+    error: 'Not Found',
+    message: `Route ${req.originalUrl} not found`,
+    timestamp: new Date().toISOString()
+  });
+});
+
+module.exports = app;
