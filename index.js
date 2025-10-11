@@ -69,7 +69,6 @@ const getRouteDefinitions = () => {
   const originalRoutes = [
     // Main API files
     { path: '/api/claim', file: './api/claim.js' },
-    { path: '/api/admin/claims', file: './api/claim.js' },
     { path: '/api/giveaway', file: './api/giveaway.js' },
     { path: '/api/locations', file: './api/locations.js' },
     { path: '/api/media', file: './api/media.js' },
