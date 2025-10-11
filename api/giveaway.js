@@ -80,8 +80,16 @@ router.get('/', async (req, res) => {
     res.status(200).json({
       giveaway: giveaway ? {
         ...giveaway,
-        prize_amount: giveaway.prize_pool_sol // Map database column to frontend expectation
-      } : null,
+        prize_amount: giveaway.prize_pool_sol, // Map database column to frontend expectation
+        is_completed: giveaway.is_completed || false // Ensure boolean is always present
+      } : {
+        // Default giveaway structure if none exists
+        id: null,
+        date: todayStr,
+        prize_amount: 0.3,
+        is_completed: false,
+        is_active: true
+      },
       entries: entries || [],
       canSubmit,
       isDisplayWindow: isInCutoffPeriod,
