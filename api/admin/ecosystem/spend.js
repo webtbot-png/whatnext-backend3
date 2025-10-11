@@ -298,6 +298,109 @@ router.delete('/:id', async (req, res) => {
 });
 
 /**
+ * POST /api/admin/ecosystem/spend
+ * Add a new spending entry
+ */
+router.post('/', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { title, description, amount_sol, amount_usd, category, transaction_hash } = req.body;
+    
+    if (!title && !description) {
+      return res.status(400).json({
+        success: false,
+        error: 'Title or description is required'
+      });
+    }
+    
+    if (!amount_sol || amount_sol <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valid SOL amount is required'
+      });
+    }
+
+    const supabase = getSupabaseAdminClient();
+    console.log('➕ Admin ecosystem/spend: Adding new spending entry');
+    
+    const newEntry = {
+      title: title || description?.substring(0, 50),
+      description: description || title,
+      amount_sol: parseFloat(amount_sol),
+      amount_usd: amount_usd ? parseFloat(amount_usd) : null,
+      category: category || 'expense',
+      transaction_hash: transaction_hash || null,
+      transaction_verified: false,
+      spent_at: new Date().toISOString(),
+      created_at: new Date().toISOString()
+    };
+
+    const { data: createdEntry, error } = await supabase
+      .from('spend_log')
+      .insert([newEntry])
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Error creating spending entry:', error);
+      throw error;
+    }
+
+    console.log('✅ Admin ecosystem/spend: Successfully created spending entry:', createdEntry.id);
+    return res.json({
+      success: true,
+      message: 'Spending entry created successfully',
+      entry: createdEntry
+    });
+    
+  } catch (error) {
+    console.error('Admin ecosystem/spend POST error:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to create spending entry',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+/**
+ * GET /api/admin/ecosystem/spend/bulk
+ * Get bulk operations info (for frontend compatibility)
+ */
+router.get('/bulk', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    console.log('ℹ️ Admin ecosystem/spend/bulk GET: Returning bulk operations info');
+    
+    res.json({
+      success: true,
+      message: 'Bulk operations endpoint is operational',
+      info: 'Use POST method with action and ids to perform bulk operations',
+      supported_actions: ['delete'],
+      example: {
+        method: 'POST',
+        body: {
+          action: 'delete',
+          ids: ['id1', 'id2', 'id3'],
+          types: ['expense', 'giveaway', 'qr_claim']
+        }
+      }
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+/**
  * POST /api/admin/ecosystem/spend/bulk - Bulk operations (delete multiple entries)
  */
 router.post('/bulk', async (req, res) => {
