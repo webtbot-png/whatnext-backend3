@@ -1,12 +1,6 @@
 const express = require('express');
 const router = express.Router();
 
-// Debug middleware to log all admin requests
-router.use((req, res, next) => {
-  console.log(`🔍 Admin Route: ${req.method} ${req.originalUrl}`);
-  next();
-});
-
 // Mount all admin routes
 try {
   router.use('/login', require('./login.js'));
@@ -27,7 +21,6 @@ try {
   router.use('/locations', require('./locations.js'));
   router.use('/social', require('./social.js'));
   router.use('/ecosystem', require('./ecosystem.js'));
-  console.log('✅ Mounted admin ecosystem router at /api/admin/ecosystem');
   router.use('/pumpfun', require('./pumpfun.js'));
   router.use('/live-stream', require('./live-stream.js'));
   router.use('/toggle-live', require('./toggle-live.js'));
