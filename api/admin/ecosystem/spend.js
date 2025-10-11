@@ -1,5 +1,17 @@
 const express = require('express');
+const jwt = require('jsonwebtoken');
 const router = express.Router();
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
+
+function verifyAdminToken(req) {
+  const authHeader = req.headers?.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    throw new Error('Unauthorized');
+  }
+  const token = authHeader.substring(7);
+  jwt.verify(token, JWT_SECRET);
+}
 
 /**
  * GET /api/admin/ecosystem/spend
@@ -8,6 +20,7 @@ const router = express.Router();
  */
 router.get('/', async (req, res) => {
   try {
+    verifyAdminToken(req);
     console.log('🔍 Admin ecosystem/spend: Fetching spending data...');
 
     // **REDIRECT TO RAILWAY PRODUCTION API - ONE SOURCE OF TRUTH**
@@ -33,6 +46,9 @@ router.get('/', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error calling unified ecosystem API:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     return res.status(500).json({
       success: false,
       error: 'Failed to fetch spending data',
@@ -47,6 +63,7 @@ router.get('/', async (req, res) => {
  */
 router.delete('/:id', async (req, res) => {
   try {
+    verifyAdminToken(req);
     const { id } = req.params;
     console.log(`🔍 Admin: Deleting spending entry ID: ${id}`);
 
@@ -70,6 +87,9 @@ router.delete('/:id', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Admin: Error deleting entry:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     return res.status(500).json({
       success: false,
       error: 'Failed to delete spending entry',
@@ -84,6 +104,7 @@ router.delete('/:id', async (req, res) => {
  */
 router.delete('/bulk', async (req, res) => {
   try {
+    verifyAdminToken(req);
     const { ids } = req.body;
     console.log(`🔍 Admin: Bulk deleting ${ids?.length || 0} entries`);
 
@@ -108,6 +129,9 @@ router.delete('/bulk', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Admin: Error in bulk delete:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     return res.status(500).json({
       success: false,
       error: 'Failed to bulk delete entries',
@@ -117,4 +141,3 @@ router.delete('/bulk', async (req, res) => {
 });
 
 module.exports = router;
-
