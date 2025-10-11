@@ -1,236 +1,192 @@
 const express = require('express');
-const { getSupabaseAdminClient  } = require('../../database.js');
-const jwt = require('jsonwebtoken');
-
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
+const { getSupabaseAdminClient } = require('../database.js');
 
-function verifyAdminToken(req) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new Error('Unauthorized');
-  }
-  const token = authHeader.substring(7);
-  jwt.verify(token, JWT_SECRET);
-}
+// Constants
+const GIVEAWAY_TIME_UTC = 17; // 5 PM UTC
+const CUTOFF_START_UTC = 15; // 3 PM UTC
+const DISPLAY_WINDOW_END_UTC = 17 + (10/60); // 5:10 PM UTC
 
-// NOTE: /spend routes are now handled by ./ecosystem/spend.js
+/**
+ * GET /api/giveaway - Get today's giveaway, entries, and latest winner
+ */
+router.get('/', async (req, res) => {
+  const supabase = getSupabaseAdminClient();
 
-
-
-// GET /api/admin/ecosystem/content
-router.get('/content', async (req, res) => {
   try {
-    verifyAdminToken(req);
-    const supabase = getSupabaseAdminClient();
-    const { data, error } = await supabase
-      .from('ecosystem_content')
-      .select(`
-        *,
-        location:locations(
-          id,
-          name,
-          country,
-          latitude,
-          longitude
-        )
-      `)
+    // Get today's date in UTC (YYYY-MM-DD format)
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+
+    // Check if we're in the cutoff period (3PM-5:10PM UTC)
+    const utcHours = today.getUTCHours();
+    const utcMinutes = today.getUTCMinutes();
+    const currentTime = utcHours + (utcMinutes / 60);
+    const isInCutoffPeriod = currentTime >= CUTOFF_START_UTC && currentTime <= DISPLAY_WINDOW_END_UTC;
+
+    // 1. Get or create today's giveaway
+    let { data: giveaway, error: giveawayError } = await supabase
+      .from('daily_giveaways')
+      .select('*')
+      .eq('target_date', todayStr)
+      .single();
+
+    if (giveawayError && giveawayError.code !== 'PGRST116') {
+      throw giveawayError;
+    }
+
+    // Create giveaway if it doesn't exist
+    if (!giveaway) {
+      const { data: newGiveaway, error: createError } = await supabase
+        .from('daily_giveaways')
+        .insert({
+          target_date: todayStr,
+          prize_amount: 0.3,
+          is_completed: false
+        })
+        .select()
+        .single();
+
+      if (createError) throw createError;
+      giveaway = newGiveaway;
+      console.log('✅ Created new giveaway for', todayStr);
+    }
+
+    // 2. Get entries for today's giveaway
+    const { data: entries, error: entriesError } = await supabase
+      .from('giveaway_entries')
+      .select('*')
+      .eq('giveaway_id', giveaway.id)
       .order('created_at', { ascending: false });
-    if (error) {
-      console.error('Error fetching ecosystem content:', error);
-      return res.status(500).json({ error: 'Failed to fetch ecosystem content' });
-    }
-    res.json({
-      success: true,
-      content: data || []
-    });
-  } catch (error) {
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    console.error('Error in ecosystem content endpoint:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
-// POST /api/admin/ecosystem/content
-router.post('/content', async (req, res) => {
-  try {
-    verifyAdminToken(req);
-    const supabase = getSupabaseAdminClient();
-    const {
-      title,
-      description,
-      content_type,
-      url,
-      thumbnail_url,
-      location_id,
-      tags,
-      is_featured = false
-    } = req.body;
-    if (!title || !content_type || !url) {
-      return res.status(400).json({
-        error: 'Title, content type, and URL are required'
-      });
-    }
-    const validTypes = ['video', 'article', 'livestream', 'podcast', 'image', 'other'];
-    if (!validTypes.includes(content_type)) {
-      return res.status(400).json({
-        error: 'Invalid content type. Must be one of: ' + validTypes.join(', ')
-      });
-    }
-    const contentData = {
-      title,
-      description,
-      content_type,
-      url,
-      thumbnail_url,
-      location_id: location_id || null,
-      tags: tags || [],
-      is_featured,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-    const { data, error } = await supabase
-      .from('ecosystem_content')
-      .insert(contentData)
-      .select(`
-        *,
-        location:locations(
-          id,
-          name,
-          country,
-          latitude,
-          longitude
-        )
-      `)
+    if (entriesError) throw entriesError;
+
+    // 3. Get latest winner (most recent completed giveaway with winner)
+    const { data: latestWinner, error: winnerError } = await supabase
+      .from('giveaway_winners')
+      .select('*')
+      .order('giveaway_date', { ascending: false })
+      .limit(1)
       .single();
-    if (error) {
-      console.error('Error creating ecosystem content:', error);
-      return res.status(500).json({ error: 'Failed to create ecosystem content' });
+
+    // Ignore error if no winner found
+    if (winnerError && winnerError.code !== 'PGRST116') {
+      console.error('❌ Error fetching latest winner:', winnerError);
     }
-    res.json({
-      success: true,
-      message: 'Ecosystem content created successfully',
-      data
+
+    // 4. Determine if user can submit
+    const canSubmit = !isInCutoffPeriod && !giveaway.is_completed;
+
+    res.status(200).json({
+      giveaway,
+      entries: entries || [],
+      canSubmit,
+      isDisplayWindow: isInCutoffPeriod,
+      latestWinner: latestWinner || null
     });
+
   } catch (error) {
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    console.error('Error creating ecosystem content:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('❌ Error in GET /api/giveaway:', error);
+    res.status(500).json({
+      error: 'Failed to fetch giveaway data',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
 });
 
-// PATCH /api/admin/ecosystem/content/:id
-router.patch('/content/:id', async (req, res) => {
+/**
+ * POST /api/giveaway - Submit a giveaway entry
+ */
+router.post('/', async (req, res) => {
+  const supabase = getSupabaseAdminClient();
+
+  const { walletAddress, guessedMarketCap } = req.body;
+
+  // Validation
+  if (!walletAddress || typeof walletAddress !== 'string') {
+    return res.status(400).json({ error: 'Valid wallet address is required' });
+  }
+
+  if (!guessedMarketCap || typeof guessedMarketCap !== 'number' || guessedMarketCap <= 0) {
+    return res.status(400).json({ error: 'Valid market cap guess is required' });
+  }
+
   try {
-    verifyAdminToken(req);
-    const supabase = getSupabaseAdminClient();
-    const { id } = req.params;
-    const updateData = { ...req.body };
-    if (!id) {
-      return res.status(400).json({ error: 'Content ID is required' });
+    // Get today's date
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+
+    // Check if we're in cutoff period
+    const utcHours = today.getUTCHours();
+    const utcMinutes = today.getUTCMinutes();
+    const currentTime = utcHours + (utcMinutes / 60);
+    const isInCutoffPeriod = currentTime >= CUTOFF_START_UTC && currentTime <= DISPLAY_WINDOW_END_UTC;
+
+    if (isInCutoffPeriod) {
+      return res.status(403).json({ 
+        error: 'Submissions are closed during calculation period (3:00 PM - 5:10 PM UTC)' 
+      });
     }
-    if (updateData.content_type) {
-      const validTypes = ['video', 'article', 'livestream', 'podcast', 'image', 'other'];
-      if (!validTypes.includes(updateData.content_type)) {
-        return res.status(400).json({
-          error: 'Invalid content type. Must be one of: ' + validTypes.join(', ')
-        });
+
+    // Get today's giveaway
+    const { data: giveaway, error: giveawayError } = await supabase
+      .from('daily_giveaways')
+      .select('*')
+      .eq('target_date', todayStr)
+      .single();
+
+    if (giveawayError) {
+      if (giveawayError.code === 'PGRST116') {
+        return res.status(404).json({ error: 'No active giveaway found' });
       }
+      throw giveawayError;
     }
-    updateData.updated_at = new Date().toISOString();
-    const { data, error } = await supabase
-      .from('ecosystem_content')
-      .update(updateData)
-      .eq('id', id)
-      .select(`
-        *,
-        location:locations(
-          id,
-          name,
-          country,
-          latitude,
-          longitude
-        )
-      `)
+
+    if (giveaway.is_completed) {
+      return res.status(403).json({ error: 'This giveaway has already been completed' });
+    }
+
+    // Check for duplicate entry (one entry per wallet per giveaway)
+    const { data: existingEntry, error: checkError } = await supabase
+      .from('giveaway_entries')
+      .select('id')
+      .eq('giveaway_id', giveaway.id)
+      .eq('wallet_address', walletAddress)
       .single();
-    if (error) {
-      console.error('Error updating ecosystem content:', error);
-      return res.status(500).json({ error: 'Failed to update ecosystem content' });
-    }
-    if (!data) {
-      return res.status(404).json({ error: 'Content not found' });
-    }
-    res.json({
-      success: true,
-      message: 'Ecosystem content updated successfully',
-      data
-    });
-  } catch (error) {
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    console.error('Error updating ecosystem content:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
-// DELETE /api/admin/ecosystem/content/:id
-router.delete('/content/:id', async (req, res) => {
-  try {
-    verifyAdminToken(req);
-    const supabase = getSupabaseAdminClient();
-    const { id } = req.params;
-    if (!id) {
-      return res.status(400).json({ error: 'Content ID is required' });
+    if (checkError && checkError.code !== 'PGRST116') {
+      throw checkError;
     }
-    const { error } = await supabase
-      .from('ecosystem_content')
-      .delete()
-      .eq('id', id);
-    if (error) {
-      console.error('Error deleting ecosystem content:', error);
-      return res.status(500).json({ error: 'Failed to delete ecosystem content' });
-    }
-    res.json({
-      success: true,
-      message: 'Ecosystem content deleted successfully'
-    });
-  } catch (error) {
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    console.error('Error deleting ecosystem content:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
-// GET /api/admin/ecosystem/locations
-router.get('/locations', async (req, res) => {
-  try {
-    verifyAdminToken(req);
-    const supabase = getSupabaseAdminClient();
-    const { data, error } = await supabase
-      .from('locations')
-      .select('id, name, country, latitude, longitude')
-      .order('name');
-    if (error) {
-      console.error('Error fetching locations:', error);
-      return res.status(500).json({ error: 'Failed to fetch locations' });
+    if (existingEntry) {
+      return res.status(409).json({ error: 'You have already submitted an entry for today' });
     }
-    res.json({
+
+    // Create entry
+    const { data: entry, error: insertError } = await supabase
+      .from('giveaway_entries')
+      .insert({
+        giveaway_id: giveaway.id,
+        wallet_address: walletAddress,
+        guessed_market_cap: guessedMarketCap
+      })
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    console.log('✅ Giveaway entry created:', entry.id);
+    res.status(201).json({
       success: true,
-      locations: data || []
+      entry
     });
+
   } catch (error) {
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    console.error('Error in locations endpoint:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('❌ Error in POST /api/giveaway:', error);
+    res.status(500).json({
+      error: 'Failed to submit giveaway entry',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
   }
 });
 
