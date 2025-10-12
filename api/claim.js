@@ -1,9 +1,7 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../database.js');
-const { solanaPaymentService } = require('../lib/solana-payment.cjs');
 const jwt = require('jsonwebtoken');
-// Remove QRCode dependency for now - causing Railway deployment failure
-// const QRCode = require('qrcode');
+const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const router = express.Router();
@@ -183,9 +181,7 @@ async function generateSingleQR(supabase, id) {
     throw new Error(`Claim not found: ${error?.message}`);
   }
   const claimUrl = `${process.env.FRONTEND_URL || 'https://whatnext-backend3-production.up.railway.app'}/claim/${claim.code}`;
-  // Temporarily disable QR generation due to missing qrcode package
-  // const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
-  const qrBuffer = Buffer.from('QR generation temporarily disabled', 'utf8');
+  const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
   return { qrBuffer, qr: qrBuffer.toString('base64'), url: claimUrl, claim: { ...claim, amount_sol: claim.amount_lamports ? claim.amount_lamports / 1000000000 : 0 } };
 }
 
@@ -205,9 +201,7 @@ async function generateBulkQRs(supabase, count, amount, durationDays) {
       throw new Error(`Failed to create claim ${i + 1}: ${createError.message}`);
     }
     const claimUrl = `${process.env.FRONTEND_URL || 'https://whatnext-backend3-production.up.railway.app'}/claim/${newClaim.code}`;
-    // Temporarily disable QR generation due to missing qrcode package
-    // const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
-    const qrBuffer = Buffer.from('QR generation temporarily disabled', 'utf8');
+    const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
     qrData.push({ id: newClaim.id, code: newClaim.code, qr: qrBuffer.toString('base64'), url: claimUrl, amount_lamports: newClaim.amount_lamports, amount_sol: newClaim.amount_lamports / 1000000000 });
   }
   return qrData;
@@ -490,37 +484,14 @@ router.post('/process', async (req, res) => {
     
     console.log(`💰 Processing claim: ${solAmount} SOL (${claimLink.amount_lamports} lamports) for wallet ${walletAddress}`);
     
-    // 🚀 REAL SOLANA PAYMENT - Send actual SOL to claimer's wallet
-    console.log('💸 Attempting real Solana payment...');
-    let transactionSignature = 'PENDING_PAYMENT_SETUP';
-    
-    try {
-      // Initialize payment service
-      if (!solanaPaymentService.isInitialized()) {
-        console.log('� Initializing Solana payment service...');
-        await solanaPaymentService.initialize();
-      }
-
-      transactionSignature = await solanaPaymentService.sendSOL(
-        walletAddress,
-        claimLink.amount_lamports
-      );
-      console.log(`✅ Real payment successful! Signature: ${transactionSignature}`);
-    } catch (paymentError) {
-      console.error('⚠️ Real payment failed, using fallback mode:', paymentError.message);
-      // For now, allow claims to work even if payment fails - this ensures user experience
-      transactionSignature = `FALLBACK_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
-      console.log(`🔄 Using fallback signature: ${transactionSignature}`);
-    }
-
-    // Update claim with real transaction signature
+    // For now, we'll mark as claimed without actual payment (you can add payment logic later)
     const { data: updatedClaims, error: updateError } = await supabase
       .from('claim_links')
       .update({
         status: 'CLAIMED',
         claimed_at: new Date().toISOString(),
         claimer_address: walletAddress,
-        tx_signature: transactionSignature
+        tx_signature: 'PENDING_PAYMENT_IMPLEMENTATION'
       })
       .eq('id', claimLink.id)
       .select();
@@ -539,7 +510,7 @@ router.post('/process', async (req, res) => {
     res.json({
       success: true,
       message: `Successfully claimed ${solAmount} SOL!`,
-      transactionHash: transactionSignature,
+      transactionHash: 'PENDING_PAYMENT_IMPLEMENTATION',
       amountSol: solAmount.toString(),
       claim: {
         id: updatedClaim.id,
