@@ -1,6 +1,16 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../../database.js');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
+// Safe import of Solana payment service with fallback
+let solanaPaymentService = null;
+try {
+  const solanaModule = require('../../lib/solana-payment.cjs');
+  solanaPaymentService = solanaModule.solanaPaymentService;
+  console.log('✅ Solana payment service imported successfully');
+} catch (error) {
+  console.warn('⚠️ Solana payment service not available, using fallback mode:', error.message);
+}
 
 const router = express.Router();
 const LAMPORTS_PER_SOL = 1000000000;
@@ -35,6 +45,14 @@ router.post('/', async (req, res) => {
     console.log(`💰 Amount: ${amountSol} SOL`);
     console.log(`🎯 Recipient: ${recipientAddress}`);
     console.log(`📋 Description: ${description}`);
+
+    // Check if payment service is available
+    if (!solanaPaymentService) {
+      return res.status(503).json({
+        error: 'Payment system temporarily unavailable',
+        details: 'Real SOL payments are required. Please try again later.'
+      });
+    }
 
     // Initialize payment service if needed
     if (!solanaPaymentService.isInitialized()) {
