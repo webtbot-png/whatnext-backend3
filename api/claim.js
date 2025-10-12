@@ -2,7 +2,8 @@ const express = require('express');
 const { getSupabaseAdminClient  } = require('../database.js');
 const { solanaPaymentService } = require('../lib/solana-payment.cjs');
 const jwt = require('jsonwebtoken');
-const QRCode = require('qrcode');
+// Remove QRCode dependency for now - causing Railway deployment failure
+// const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const router = express.Router();
@@ -182,7 +183,9 @@ async function generateSingleQR(supabase, id) {
     throw new Error(`Claim not found: ${error?.message}`);
   }
   const claimUrl = `${process.env.FRONTEND_URL || 'https://whatnext-backend3-production.up.railway.app'}/claim/${claim.code}`;
-  const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
+  // Temporarily disable QR generation due to missing qrcode package
+  // const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
+  const qrBuffer = Buffer.from('QR generation temporarily disabled', 'utf8');
   return { qrBuffer, qr: qrBuffer.toString('base64'), url: claimUrl, claim: { ...claim, amount_sol: claim.amount_lamports ? claim.amount_lamports / 1000000000 : 0 } };
 }
 
@@ -202,7 +205,9 @@ async function generateBulkQRs(supabase, count, amount, durationDays) {
       throw new Error(`Failed to create claim ${i + 1}: ${createError.message}`);
     }
     const claimUrl = `${process.env.FRONTEND_URL || 'https://whatnext-backend3-production.up.railway.app'}/claim/${newClaim.code}`;
-    const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
+    // Temporarily disable QR generation due to missing qrcode package
+    // const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
+    const qrBuffer = Buffer.from('QR generation temporarily disabled', 'utf8');
     qrData.push({ id: newClaim.id, code: newClaim.code, qr: qrBuffer.toString('base64'), url: claimUrl, amount_lamports: newClaim.amount_lamports, amount_sol: newClaim.amount_lamports / 1000000000 });
   }
   return qrData;
