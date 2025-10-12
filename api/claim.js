@@ -3,7 +3,7 @@ const { getSupabaseAdminClient  } = require('../database.js');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
-const { solanaPaymentService } = require('../lib/solana-payment.cjs');
+const { solanaPaymentService } = require('./lib/solana-payment.cjs');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
