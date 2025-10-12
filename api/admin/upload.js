@@ -239,7 +239,7 @@ router.post('/', async (req, res) => {
       tempDir: tempDir
     });
   }
-  
+
   // Security: Only allow video file extensions
   const ALLOWED_VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
   
@@ -280,6 +280,7 @@ router.post('/', async (req, res) => {
       formError: formError.message
     });
   }
+
   form.parse(req, async (err, fields, files) => {
     if (err) {
       console.error('❌ Formidable parsing error:', {
@@ -312,6 +313,7 @@ router.post('/', async (req, res) => {
       const allowedExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
       return res.status(400).json({ error: 'Invalid file extension. Allowed: ' + allowedExtensions.join(', ') });
     }
+    
     // Extract contentEntryId from fields (could be array or string)
     let contentEntryId = fields.contentEntryId || fields.content_entry_id || fields.id;
     if (Array.isArray(contentEntryId)) {
@@ -323,6 +325,7 @@ router.post('/', async (req, res) => {
     if (!contentEntryId) {
       return res.status(400).json({ error: 'Missing content entry ID. Please provide contentEntryId in the upload form.' });
     }
+    
     try {
       console.log('🎬 Creating Bunny.net video entry...');
       console.log('📋 File details:', {
@@ -343,13 +346,14 @@ router.post('/', async (req, res) => {
       const { status, directUrl, videoInfo } = await pollBunnyStatus(videoId);
       const iframeUrl = `https://iframe.mediadelivery.net/embed/${BUNNY_LIBRARY_ID}/${videoId}`;
       const playUrl = `https://iframe.mediadelivery.net/play/${BUNNY_LIBRARY_ID}/${videoId}`;
-      console.log('🎥 Playbook URL:', iframeUrl);
+      console.log('🎥 Iframe URL:', iframeUrl);
       console.log('🐰 Final Bunny videoInfo:', videoInfo);
       
       // Always update Supabase with the iframe URL - video will work when processing completes
       const finalUrl = directUrl || iframeUrl;
       console.log('📝 Updating Supabase content entry with final URL:', finalUrl);
       await updateSupabase(contentEntryId, finalUrl);
+      
       res.json({
         success: true,
         url: iframeUrl,
@@ -400,4 +404,3 @@ router.post('/', async (req, res) => {
 });
 
 module.exports = router;
-
