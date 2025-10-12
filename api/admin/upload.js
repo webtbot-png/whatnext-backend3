@@ -21,8 +21,17 @@ function verifyAdminToken(req) {
 
 const BUNNY_LIBRARY_ID = process.env.BUNNY_LIBRARY_ID;
 const BUNNY_API_KEY = process.env.BUNNY_API_KEY;
+
+console.log('🔥 BUNNY CONFIG CHECK:', {
+  BUNNY_LIBRARY_ID: BUNNY_LIBRARY_ID ? '✅ SET' : '❌ MISSING',
+  BUNNY_API_KEY: BUNNY_API_KEY ? '✅ SET' : '❌ MISSING'
+});
+
 if (!BUNNY_LIBRARY_ID || !BUNNY_API_KEY) {
-  throw new Error('BUNNY_LIBRARY_ID and BUNNY_API_KEY must be set in environment variables');
+  console.error('❌ CRITICAL ERROR: Missing Bunny CDN environment variables!');
+  console.error('❌ BUNNY_LIBRARY_ID:', BUNNY_LIBRARY_ID || 'UNDEFINED');
+  console.error('❌ BUNNY_API_KEY:', BUNNY_API_KEY ? 'DEFINED' : 'UNDEFINED');
+  // Don't throw error at module level - handle in route instead
 }
 
 function extractFile(files) {
@@ -203,7 +212,8 @@ function isAllowedExtension(filename) {
 
 router.post('/', async (req, res) => {
   console.log('🚀🚀🚀 UPLOAD ENDPOINT HIT! 🚀🚀🚀');
-  console.log('📋 Request details:', {
+  console.log('�🔥🔥 SUPER CRITICAL LOG - UPLOAD STARTING 🔥🔥🔥');
+  console.log('�📋 Request details:', {
     method: req.method,
     url: req.url,
     contentType: req.headers['content-type'],
@@ -220,6 +230,17 @@ router.post('/', async (req, res) => {
     console.error('❌ Authentication failed:', authError.message);
     return res.status(401).json({ error: 'Unauthorized' });
   }
+
+  // Check Bunny CDN configuration
+  if (!BUNNY_LIBRARY_ID || !BUNNY_API_KEY) {
+    console.error('❌ BUNNY CDN NOT CONFIGURED - Missing environment variables!');
+    return res.status(500).json({ 
+      error: 'Server configuration error', 
+      details: 'Bunny CDN credentials not configured',
+      timestamp: new Date().toISOString()
+    });
+  }
+  console.log('✅ Bunny CDN credentials verified');
 
   // Use Railway's writable /tmp directory instead of project directory
   const tempDir = process.env.RAILWAY_ENVIRONMENT ? '/tmp/bunny-temp' : path.join(process.cwd(), 'public', 'uploads', 'bunny-temp');
