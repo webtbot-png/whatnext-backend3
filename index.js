@@ -77,7 +77,6 @@ const getRouteDefinitions = () => {
     { path: '/api/raw-db', file: './api/raw-db.js' },
     { path: '/api/roadmap', file: './api/roadmap.js' },
     { path: '/api/schedules', file: './api/schedules.js' },
-    { path: '/api/sol-price', file: './api/sol-price.js' },
     { path: '/api/seed', file: './api/seed.js' },
     { path: '/api/stats', file: './api/stats.js' },
     { path: '/api/testimonials', file: './api/testimonials.js' },
