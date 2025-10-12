@@ -494,35 +494,42 @@ router.post('/process', async (req, res) => {
     
     console.log(`💰 Processing claim: ${solAmount} SOL (${claimLink.amount_lamports} lamports) for wallet ${walletAddress}`);
     
-    // 🚀 REAL SOLANA PAYMENT INTEGRATION with safe fallback
-    let transactionSignature = 'FALLBACK_MOCK_PAYMENT';
-    
-    if (solanaPaymentService) {
-      try {
-        console.log('💸 Attempting real Solana payment...');
-        
-        // Initialize payment service if needed
-        if (!solanaPaymentService.isInitialized()) {
-          console.log('🔄 Initializing Solana payment service...');
-          await solanaPaymentService.initialize();
-        }
+    // 🚀 REAL SOLANA PAYMENT - NO MOCKS, REAL PAYMENTS ONLY
+    if (!solanaPaymentService) {
+      console.error('❌ Payment service not available - claims cannot be processed');
+      return res.status(503).json({
+        success: false,
+        error: 'Payment system temporarily unavailable',
+        details: 'Real SOL payments are required. Please try again later.'
+      });
+    }
 
-        // Send real SOL payment
-        transactionSignature = await solanaPaymentService.sendSOL(
-          walletAddress,
-          claimLink.amount_lamports
-        );
-        
-        console.log(`✅ REAL PAYMENT SUCCESSFUL! Signature: ${transactionSignature}`);
-        
-      } catch (paymentError) {
-        console.error('⚠️ Real payment failed, using fallback:', paymentError.message);
-        transactionSignature = `FALLBACK_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
-        console.log(`🔄 Using fallback signature: ${transactionSignature}`);
+    let transactionSignature;
+    
+    try {
+      console.log('💸 Processing real Solana payment...');
+      
+      // Initialize payment service if needed
+      if (!solanaPaymentService.isInitialized()) {
+        console.log('🔄 Initializing Solana payment service...');
+        await solanaPaymentService.initialize();
       }
-    } else {
-      console.log('⚠️ Payment service not available, using mock payment');
-      transactionSignature = `MOCK_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+
+      // Send real SOL payment - MUST succeed or claim fails
+      transactionSignature = await solanaPaymentService.sendSOL(
+        walletAddress,
+        claimLink.amount_lamports
+      );
+      
+      console.log(`✅ REAL PAYMENT SUCCESSFUL! Signature: ${transactionSignature}`);
+      
+    } catch (paymentError) {
+      console.error('❌ Real payment failed:', paymentError.message);
+      return res.status(500).json({
+        success: false,
+        error: 'Payment processing failed',
+        details: `Unable to send ${solAmount} SOL to ${walletAddress}. ${paymentError.message}`
+      });
     }
 
     // Update claim with transaction signature (real or fallback)
