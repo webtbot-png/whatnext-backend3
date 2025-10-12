@@ -133,20 +133,46 @@ async function pollBunnyStatus(videoId) {
 
 async function updateSupabase(contentEntryId, updateUrl) {
   try {
-  const { getSupabaseAdminClient  } = require('../../database.js');
+    const { getSupabaseAdminClient  } = require('../../database.js');
     const supabase = getSupabaseAdminClient();
+    
+    // First, get the current content entry to preserve location_id
+    const { data: currentEntry, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('location_id')
+      .eq('id', contentEntryId)
+      .single();
+      
+    if (fetchError) {
+      console.error('❌ Failed to fetch current content entry:', fetchError);
+    }
+    
+    // Update with media URL and set status to published
+    const updateData = {
+      media_url: updateUrl,
+      status: 'published',
+      published_at: new Date().toISOString()
+    };
+    
+    // Preserve location_id if it exists
+    if (currentEntry?.location_id) {
+      console.log('✅ Preserving location_id:', currentEntry.location_id);
+    } else {
+      console.warn('⚠️ No location_id found - video will not appear on map');
+    }
+    
     const { error: updateError } = await supabase
       .from('content_entries')
-      .update({
-        media_url: updateUrl,
-        status: 'published',
-        published_at: new Date().toISOString()
-      })
+      .update(updateData)
       .eq('id', contentEntryId);
+      
     if (updateError) {
       console.error('❌ Failed to update content entry with video URL:', updateError);
     } else {
-      console.log('✅ Content entry updated with Bunny video URL:', updateUrl);
+      console.log('✅ Content entry updated successfully:');
+      console.log(`   - Status: uploading → published`);
+      console.log(`   - Media URL: ${updateUrl}`);
+      console.log(`   - Location ID: ${currentEntry?.location_id || 'None (won\'t show on map)'}`);
     }
   } catch (err) {
     console.error('❌ Error updating content entry after Bunny upload:', err);
@@ -219,6 +245,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'No file uploaded (parsed files: ' + JSON.stringify(files) + ', fileObj: ' + JSON.stringify(fileObj) + ')'});
     }
     if (!isAllowedExtension(fileObj.originalFilename)) {
+      const allowedExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
       return res.status(400).json({ error: 'Invalid file extension. Allowed: ' + allowedExtensions.join(', ') });
     }
     // Extract contentEntryId from fields (could be array or string)
