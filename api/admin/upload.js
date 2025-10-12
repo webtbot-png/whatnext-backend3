@@ -202,6 +202,15 @@ function isAllowedExtension(filename) {
 }
 
 router.post('/', async (req, res) => {
+  console.log('🚀 Upload endpoint called');
+  console.log('📋 Request details:', {
+    method: req.method,
+    url: req.url,
+    contentType: req.headers['content-type'],
+    contentLength: req.headers['content-length'],
+    userAgent: req.headers['user-agent']
+  });
+  
   try {
     // Verify admin authentication
     verifyAdminToken(req);
@@ -211,46 +220,85 @@ router.post('/', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const tempDir = path.join(process.cwd(), 'public', 'uploads', 'bunny-temp');
-  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+  // Use Railway's writable /tmp directory instead of project directory
+  const tempDir = process.env.RAILWAY_ENVIRONMENT ? '/tmp/bunny-temp' : path.join(process.cwd(), 'public', 'uploads', 'bunny-temp');
+  console.log('📁 Using temp directory:', tempDir);
+  
+  try {
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+      console.log('✅ Created temp directory:', tempDir);
+    } else {
+      console.log('✅ Temp directory exists:', tempDir);
+    }
+  } catch (dirError) {
+    console.error('❌ Failed to create temp directory:', dirError.message);
+    return res.status(500).json({ 
+      error: 'Server configuration error', 
+      details: 'Cannot create temporary upload directory',
+      tempDir: tempDir
+    });
+  }
   
   // Security: Only allow video file extensions
   const ALLOWED_VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
   
-  // Configure formidable with strict file extension restrictions
-  // Extension filtering is explicitly implemented in the filter function below
-  // NOSONAR - False positive: File extensions are restricted via filter callback
-  const form = formidable({
-    multiples: false,
-    uploadDir: tempDir,
-    keepExtensions: true,
-    maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB max per file
-    maxTotalFileSize: 2 * 1024 * 1024 * 1024, // 2GB total
-    // Security filter: Explicitly restrict to allowed video extensions only
-    filter: function({ originalFilename }) {
-      if (!originalFilename) {
-        console.warn('⚠️ Upload rejected: No filename provided');
-        return false;
+  let form;
+  try {
+    // Configure formidable with strict file extension restrictions
+    // Extension filtering is explicitly implemented in the filter function below
+    // NOSONAR - False positive: File extensions are restricted via filter callback
+    form = formidable({
+      multiples: false,
+      uploadDir: tempDir,
+      keepExtensions: true,
+      maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB max per file
+      maxTotalFileSize: 2 * 1024 * 1024 * 1024, // 2GB total
+      // Security filter: Explicitly restrict to allowed video extensions only
+      filter: function({ originalFilename }) {
+        console.log('🔍 Filtering file:', originalFilename);
+        if (!originalFilename) {
+          console.warn('⚠️ Upload rejected: No filename provided');
+          return false;
+        }
+        const ext = path.extname(originalFilename).toLowerCase();
+        const isAllowed = ALLOWED_VIDEO_EXTENSIONS.includes(ext);
+        if (!isAllowed) {
+          console.warn(`⚠️ Upload rejected: Invalid extension "${ext}" for file "${originalFilename}"`);
+        } else {
+          console.log(`✅ Upload accepted: Valid extension "${ext}" for file "${originalFilename}"`);
+        }
+        return isAllowed; // Only .mp4, .mov, .avi, .mkv, .webm allowed
       }
-      const ext = path.extname(originalFilename).toLowerCase();
-      const isAllowed = ALLOWED_VIDEO_EXTENSIONS.includes(ext);
-      if (!isAllowed) {
-        console.warn(`⚠️ Upload rejected: Invalid extension "${ext}" for file "${originalFilename}"`);
-      }
-      return isAllowed; // Only .mp4, .mov, .avi, .mkv, .webm allowed
-    }
-  });
+    });
+    console.log('✅ Formidable configured successfully');
+  } catch (formError) {
+    console.error('❌ Failed to configure formidable:', formError);
+    return res.status(500).json({ 
+      error: 'Server configuration error',
+      details: 'Failed to initialize file upload handler',
+      formError: formError.message
+    });
+  }
   form.parse(req, async (err, fields, files) => {
     if (err) {
       console.error('❌ Formidable parsing error:', {
         message: err.message,
         code: err.code,
         stack: err.stack,
-        httpCode: err.httpCode
+        httpCode: err.httpCode,
+        tempDir: tempDir,
+        processEnv: {
+          NODE_ENV: process.env.NODE_ENV,
+          RAILWAY_ENVIRONMENT: process.env.RAILWAY_ENVIRONMENT,
+          PWD: process.env.PWD
+        }
       });
-      return res.status(400).json({ 
-        error: 'File upload error',
+      return res.status(500).json({ 
+        error: 'File upload parsing error',
         details: err.message,
+        code: err.code,
+        tempDir: tempDir,
         formidableError: true
       });
     }
