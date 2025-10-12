@@ -66,24 +66,40 @@ async function createBunnyVideo(fileObj) {
 }
 
 async function uploadBunnyFile(videoId, fileObj) {
-  const videoStream = fs.createReadStream(fileObj.filepath);
-  const uploadRes = await fetch(
-    `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoId}`,
-    {
-      method: 'PUT',
-      headers: {
-        'AccessKey': String(BUNNY_API_KEY),
-        'Content-Type': 'application/octet-stream',
-      },
-      body: videoStream,
-      duplex: 'half' // Required for Node.js fetch with streams
+  try {
+    console.log('📁 Reading video file for upload...');
+    const videoBuffer = fs.readFileSync(fileObj.filepath);
+    console.log('📏 Video file size:', videoBuffer.length, 'bytes');
+    
+    const uploadRes = await fetch(
+      `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoId}`,
+      {
+        method: 'PUT',
+        headers: {
+          'AccessKey': String(BUNNY_API_KEY),
+          'Content-Type': 'application/octet-stream',
+        },
+        body: videoBuffer
+      }
+    );
+    
+    const uploadResText = await uploadRes.text();
+    console.log('🐰 Bunny upload response:', uploadRes.status, uploadResText);
+    
+    // Clean up the temporary file
+    fs.unlinkSync(fileObj.filepath);
+    
+    if (!uploadRes.ok) {
+      throw new Error(`Upload failed: ${uploadResText}`);
     }
-  );
-  const uploadResText = await uploadRes.text();
-  console.log('🐰 Bunny upload response:', uploadRes.status, uploadResText);
-  fs.unlinkSync(fileObj.filepath);
-  if (!uploadRes.ok) {
-    throw new Error(`Upload failed: ${uploadResText}`);
+    
+    console.log('✅ Video file uploaded to Bunny successfully');
+  } catch (error) {
+    // Make sure to clean up file even if upload fails
+    if (fs.existsSync(fileObj.filepath)) {
+      fs.unlinkSync(fileObj.filepath);
+    }
+    throw new Error(`Upload file error: ${error.message}`);
   }
 }
 
@@ -305,8 +321,32 @@ router.post('/', async (req, res) => {
           : 'Video uploaded! Bunny is processing it now (may take up to 1 minute).'
       });
     } catch (error) {
-      console.error('Bunny upload error:', error);
-      res.status(500).json({ error: 'Failed to upload to Bunny.net', details: error?.message || String(error) });
+      console.error('❌ Bunny upload error:', {
+        message: error.message,
+        stack: error.stack,
+        name: error.name
+      });
+      
+      let errorMessage = 'Failed to upload to Bunny.net';
+      let errorDetails = error?.message || String(error);
+      
+      // Provide more specific error messages
+      if (error.message.includes('ENOENT')) {
+        errorMessage = 'Video file not found during upload';
+        errorDetails = 'The uploaded file could not be read from temporary storage';
+      } else if (error.message.includes('EACCES')) {
+        errorMessage = 'File permission error during upload';
+        errorDetails = 'Server lacks permission to read the uploaded file';
+      } else if (error.message.includes('fetch')) {
+        errorMessage = 'Network error connecting to Bunny CDN';
+        errorDetails = error.message;
+      }
+      
+      res.status(500).json({ 
+        error: errorMessage,
+        details: errorDetails,
+        timestamp: new Date().toISOString()
+      });
     }
   });
 });
