@@ -158,6 +158,7 @@ const getRouteDefinitions = () => {
     { path: '/api/settings/public', file: './api/settings/public.js' },
     { path: '/api/social/auto-update', file: './api/social/auto-update.js' },
     { path: '/api/social/community-tweets', file: './api/social/community-tweets.js' },
+    { path: '/api/social/leaderboard', file: './api/social/leaderboard.js' },
     { path: '/api/social/twitter-followers', file: './api/social/twitter-followers.js' },
     { path: '/api/twitter/stats', file: './api/twitter/stats.js' }
   ];
