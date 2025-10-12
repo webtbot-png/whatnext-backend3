@@ -1,7 +1,18 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../../database.js');
 
+// Safe import of Solana payment service with fallback
+let solanaPaymentService = null;
+try {
+  const solanaModule = require('../../lib/solana-payment.cjs');
+  solanaPaymentService = solanaModule.solanaPaymentService;
+  console.log('✅ Solana payment service imported successfully');
+} catch (error) {
+  console.warn('⚠️ Solana payment service not available, using fallback mode:', error.message);
+}
+
 const jwt = require('jsonwebtoken');
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
@@ -36,6 +47,52 @@ async function getTodayGiveaway(supabase, today) {
   }
 
   return giveaway;
+}
+
+/**
+ * Get contract address from database settings
+ */
+async function getContractAddressFromDatabase(supabase) {
+  const { data, error } = await supabase
+    .from('settings')
+    .select('value')
+    .eq('key', 'pumpfun_contract_address')
+    .single();
+
+  if (error || !data) {
+    console.warn('⚠️ No pump.fun contract address found in settings');
+    return null;
+  }
+
+  return data.value;
+}
+
+/**
+ * Fetch market cap from pump.fun API
+ */
+async function fetchPumpFunMarketCap(contractAddress) {
+  try {
+    const response = await fetch(`https://frontend-api.pump.fun/coins/${contractAddress}`);
+    if (!response.ok) {
+      throw new Error(`Pump.fun API returned ${response.status}`);
+    }
+    
+    const data = await response.json();
+    const marketCap = data.market_cap || 0;
+    
+    return {
+      success: true,
+      marketCap: marketCap,
+      source: 'pump.fun'
+    };
+  } catch (error) {
+    console.error('❌ Failed to fetch from pump.fun:', error);
+    return {
+      success: false,
+      marketCap: 0,
+      error: error.message
+    };
+  }
 }
 
 /**
@@ -124,6 +181,10 @@ async function markGiveawayCompleted(supabase, giveawayId) {
  * Initialize payment service if needed
  */
 async function ensurePaymentServiceInitialized() {
+  if (!solanaPaymentService) {
+    throw new Error('Payment system temporarily unavailable - Real SOL payments are required');
+  }
+  
   if (!solanaPaymentService.isInitialized()) {
     console.log('🔄 Initializing Solana payment service...');
     await solanaPaymentService.initialize();
