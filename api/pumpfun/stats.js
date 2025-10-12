@@ -1,6 +1,61 @@
 const express = require('express');
 const router = express.Router();
 
+// Function to get holder count from Solscan API as fallback
+async function getHoldersCount(contractAddress) {
+  try {
+    console.log('Attempting to fetch holders from Solscan for:', contractAddress);
+    const solscanUrl = `https://public-api.solscan.io/token/holders?tokenAddress=${contractAddress}`;
+    const response = await fetch(solscanUrl, {
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'WhatNext/1.0'
+      }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      console.log('Solscan holders response:', data);
+      
+      if (data.data && Array.isArray(data.data)) {
+        return data.data.length;
+      }
+      if (data.total) {
+        return parseInt(data.total);
+      }
+    }
+  } catch (error) {
+    console.log('Solscan holders API failed:', error);
+  }
+  
+  // Try alternative: Birdeye API
+  try {
+    console.log('Attempting to fetch holders from Birdeye for:', contractAddress);
+    const birdeyeUrl = `https://public-api.birdeye.so/defi/token_overview?address=${contractAddress}`;
+    const response = await fetch(birdeyeUrl, {
+      headers: {
+        'Accept': 'application/json',
+        'X-API-KEY': process.env.BIRDEYE_API_KEY || '', // Optional API key
+        'User-Agent': 'WhatNext/1.0'
+      }
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      console.log('Birdeye holders response:', data);
+      
+      if (data.data && data.data.holder) {
+        return parseInt(data.data.holder);
+      }
+    }
+  } catch (error) {
+    console.log('Birdeye holders API failed:', error);
+  }
+  
+  console.log('All holder count APIs failed, returning 0');
+  return 0;
+}
+
 router.get('/', async (req, res) => {
   try {
     const contractAddress = req.query.contract;
@@ -46,6 +101,22 @@ router.get('/', async (req, res) => {
         console.log('Pump.fun API response:', data);
         if (data) {
           const tokenData = data;
+          
+          // Try to get holders from pump.fun data first
+          let holders = parseInt(tokenData.holder_count || tokenData.holders || '0');
+          console.log('Pump.fun holders data:', { 
+            holder_count: tokenData.holder_count, 
+            holders: tokenData.holders, 
+            parsed: holders,
+            raw_data_keys: Object.keys(tokenData)
+          });
+          
+          // If pump.fun doesn't have holders data, try fallback APIs
+          if (holders === 0) {
+            console.log('Pump.fun has no holder data, trying fallback APIs...');
+            holders = await getHoldersCount(cleanContractAddress);
+          }
+          
           return res.json({
             success: true,
             source: 'pump.fun',
@@ -57,7 +128,7 @@ router.get('/', async (req, res) => {
               marketCap: parseFloat(tokenData.market_cap || tokenData.usd_market_cap || '0'),
               volume24h: parseFloat(tokenData.volume_24h || '0'),
               price: parseFloat(tokenData.price || '0'),
-              holders: parseInt(tokenData.holder_count || tokenData.holders || '0'),
+              holders: holders,
               image: tokenData.image_uri || tokenData.image || '',
               createdTimestamp: tokenData.created_timestamp || Date.now(),
               website: tokenData.website || '',
@@ -97,7 +168,7 @@ router.get('/', async (req, res) => {
               marketCap: parseFloat(pair.fdv || pair.marketCap || '0'),
               volume24h: parseFloat(pair.volume?.h24 || '0'),
               price: parseFloat(pair.priceUsd || '0'),
-              holders: 0,
+              holders: await getHoldersCount(cleanContractAddress),
               image: pair.info?.imageUrl || '',
               createdTimestamp: pair.pairCreatedAt || Date.now(),
               priceChange24h: parseFloat(pair.priceChange?.h24 || '0')
@@ -110,6 +181,7 @@ router.get('/', async (req, res) => {
     }
     // Return basic placeholder data if all APIs fail
     console.log('All APIs failed, returning placeholder data');
+    const fallbackHolders = await getHoldersCount(cleanContractAddress);
     return res.json({
       success: true,
       source: 'placeholder',
@@ -121,7 +193,7 @@ router.get('/', async (req, res) => {
         marketCap: 0,
         volume24h: 0,
         price: 0,
-        holders: 0,
+        holders: fallbackHolders,
         image: '',
         createdTimestamp: Date.now()
       }
