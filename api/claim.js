@@ -1,5 +1,6 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../database.js');
+const { solanaPaymentService } = require('../lib/solana-payment.cjs');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
@@ -484,14 +485,38 @@ router.post('/process', async (req, res) => {
     
     console.log(`💰 Processing claim: ${solAmount} SOL (${claimLink.amount_lamports} lamports) for wallet ${walletAddress}`);
     
-    // For now, we'll mark as claimed without actual payment (you can add payment logic later)
+    // Initialize payment service
+    if (!solanaPaymentService.isInitialized()) {
+      await solanaPaymentService.initialize();
+    }
+
+    // 🚀 REAL SOLANA PAYMENT - Send actual SOL to claimer's wallet
+    console.log('💸 Processing real Solana payment...');
+    let transactionSignature;
+    
+    try {
+      transactionSignature = await solanaPaymentService.sendSOL(
+        walletAddress,
+        claimLink.amount_lamports
+      );
+      console.log(`✅ Payment successful! Signature: ${transactionSignature}`);
+    } catch (paymentError) {
+      console.error('❌ Payment failed:', paymentError);
+      return res.status(500).json({
+        success: false,
+        error: 'Payment processing failed',
+        details: paymentError.message
+      });
+    }
+
+    // Update claim with real transaction signature
     const { data: updatedClaims, error: updateError } = await supabase
       .from('claim_links')
       .update({
         status: 'CLAIMED',
         claimed_at: new Date().toISOString(),
         claimer_address: walletAddress,
-        tx_signature: 'PENDING_PAYMENT_IMPLEMENTATION'
+        tx_signature: transactionSignature
       })
       .eq('id', claimLink.id)
       .select();
@@ -510,7 +535,7 @@ router.post('/process', async (req, res) => {
     res.json({
       success: true,
       message: `Successfully claimed ${solAmount} SOL!`,
-      transactionHash: 'PENDING_PAYMENT_IMPLEMENTATION',
+      transactionHash: transactionSignature,
       amountSol: solAmount.toString(),
       claim: {
         id: updatedClaim.id,
