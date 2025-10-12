@@ -189,7 +189,7 @@ async function generateSingleQR(supabase, id) {
 async function generateBulkQRs(supabase, count, amount, durationDays) {
   const qrData = [];
   for (let i = 0; i < count; i++) {
-    const code = Math.random().toString(36).substring(2, 15);
+    const code = Math.random().toString(36).substring(2, 15).toUpperCase();
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + durationDays);
     const { data: newClaim, error: createError } = await supabase
@@ -213,7 +213,7 @@ async function handleLegacyBulkCreation(supabase, count, amount, durationDays) {
   if (amount < 0 || amount > 10000) throw new Error('Amount must be between 0 and 10000 SOL');
   const claimsToCreate = [];
   for (let i = 0; i < count; i++) {
-    const code = Math.random().toString(36).substring(2, 15);
+    const code = Math.random().toString(36).substring(2, 15).toUpperCase();
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + durationDays);
     claimsToCreate.push({ code, amount_lamports: Math.floor(amount * 1000000000), expires_at: expiresAt.toISOString(), status: 'ACTIVE', created_at: new Date().toISOString() });
