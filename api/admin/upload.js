@@ -182,20 +182,33 @@ async function pollBunnyStatus(videoId) {
 }
 
 async function updateSupabase(contentEntryId, updateUrl) {
+  console.log('🔍 Starting Supabase update...');
+  console.log('🔍 Content Entry ID:', contentEntryId);
+  console.log('🔍 Update URL:', updateUrl);
+  
   try {
-    const { getSupabaseAdminClient  } = require('./../../database.js');
+    // Import database module
+    console.log('📦 Importing database module...');
+    const { getSupabaseAdminClient } = require('../../database.js');
+    console.log('✅ Database module imported successfully');
+    
     const supabase = getSupabaseAdminClient();
+    console.log('✅ Supabase client obtained');
     
     // First, get the current content entry to preserve location_id
+    console.log('🔍 Fetching current content entry...');
     const { data: currentEntry, error: fetchError } = await supabase
       .from('content_entries')
-      .select('location_id')
+      .select('*')
       .eq('id', contentEntryId)
       .single();
       
     if (fetchError) {
       console.error('❌ Failed to fetch current content entry:', fetchError);
+      throw new Error(`Failed to fetch content entry: ${fetchError.message}`);
     }
+    
+    console.log('🔍 Current content entry:', JSON.stringify(currentEntry, null, 2));
     
     // Update with media URL and set status to published
     const updateData = {
@@ -204,28 +217,41 @@ async function updateSupabase(contentEntryId, updateUrl) {
       published_at: new Date().toISOString()
     };
     
+    console.log('🔍 Update data:', JSON.stringify(updateData, null, 2));
+    
     // Preserve location_id if it exists
     if (currentEntry?.location_id) {
       console.log('✅ Preserving location_id:', currentEntry.location_id);
+      console.log('✅ This video WILL appear on the map');
     } else {
-      console.warn('⚠️ No location_id found - video will not appear on map');
+      console.warn('⚠️ No location_id found - video will NOT appear on map');
+      console.warn('⚠️ Make sure location is selected during upload');
     }
     
-    const { error: updateError } = await supabase
+    console.log('📝 Updating content entry in database...');
+    const { data: updateResult, error: updateError } = await supabase
       .from('content_entries')
       .update(updateData)
-      .eq('id', contentEntryId);
+      .eq('id', contentEntryId)
+      .select();
       
     if (updateError) {
       console.error('❌ Failed to update content entry with video URL:', updateError);
-    } else {
-      console.log('✅ Content entry updated successfully:');
-      console.log(`   - Status: uploading → published`);
-      console.log(`   - Media URL: ${updateUrl}`);
-      console.log(`   - Location ID: ${currentEntry?.location_id || 'None (won\'t show on map)'}`);
+      throw new Error(`Failed to update content entry: ${updateError.message}`);
     }
+    
+    console.log('✅ Content entry updated successfully!');
+    console.log('✅ Update result:', JSON.stringify(updateResult, null, 2));
+    console.log(`✅ Status: uploading → published`);
+    console.log(`✅ Media URL: ${updateUrl}`);
+    console.log(`✅ Location ID: ${currentEntry?.location_id || 'None (won\'t show on map)'}`);
+    
+    return true;
   } catch (err) {
-    console.error('❌ Error updating content entry after Bunny upload:', err);
+    console.error('❌ CRITICAL ERROR in updateSupabase:', err.message);
+    console.error('❌ Full error:', err);
+    console.error('❌ Error stack:', err.stack);
+    throw err; // Re-throw so caller can handle
   }
 }
 
@@ -294,15 +320,22 @@ router.post('/', async (req, res) => {
 
   let form;
   try {
-    // Configure formidable - remove filter to allow all files through, validate later
+    // Configure formidable with mobile-friendly settings
+    const isMobile = req.headers['user-agent'] && 
+      /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(req.headers['user-agent']);
+    
+    console.log('📱 Mobile device detected:', isMobile);
+    
     form = formidable({
       multiples: false,
       uploadDir: tempDir,
       keepExtensions: true,
-      maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB max per file
-      maxTotalFileSize: 2 * 1024 * 1024 * 1024, // 2GB total
+      maxFileSize: isMobile ? 500 * 1024 * 1024 : 2 * 1024 * 1024 * 1024, // 500MB for mobile, 2GB for desktop
+      maxTotalFileSize: isMobile ? 500 * 1024 * 1024 : 2 * 1024 * 1024 * 1024,
+      maxFieldsSize: 20 * 1024 * 1024, // 20MB for fields
+      hashAlgorithm: false, // Disable hashing for faster processing on mobile
     });
-    console.log('✅ Formidable configured successfully (no filter)');
+    console.log(`✅ Formidable configured for ${isMobile ? 'mobile' : 'desktop'} device`);
   } catch (formError) {
     console.error('❌ Failed to configure formidable:', formError);
     return res.status(500).json({ 
@@ -383,7 +416,15 @@ router.post('/', async (req, res) => {
       // Always update Supabase with the iframe URL - video will work when processing completes
       const finalUrl = directUrl || iframeUrl;
       console.log('📝 Updating Supabase content entry with final URL:', finalUrl);
-      await updateSupabase(contentEntryId, finalUrl);
+      
+      try {
+        await updateSupabase(contentEntryId, finalUrl);
+        console.log('✅ Database update completed successfully');
+      } catch (dbError) {
+        console.error('❌ CRITICAL: Database update failed - video uploaded but not saved to database!');
+        console.error('❌ Database error:', dbError);
+        // Don't fail the whole request - video is uploaded successfully
+      }
       
       res.json({
         success: true,
