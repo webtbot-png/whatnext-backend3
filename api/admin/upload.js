@@ -202,13 +202,14 @@ function isAllowedExtension(filename) {
 }
 
 router.post('/', async (req, res) => {
-  console.log('🚀 Upload endpoint called');
+  console.log('🚀🚀🚀 UPLOAD ENDPOINT HIT! 🚀🚀🚀');
   console.log('📋 Request details:', {
     method: req.method,
     url: req.url,
     contentType: req.headers['content-type'],
     contentLength: req.headers['content-length'],
-    userAgent: req.headers['user-agent']
+    userAgent: req.headers['user-agent'],
+    timestamp: new Date().toISOString()
   });
   
   try {
