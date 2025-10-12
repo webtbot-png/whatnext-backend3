@@ -18,6 +18,17 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// CRITICAL UPLOAD DEBUGGING - Log ALL requests to /api/admin/upload
+app.use('/api/admin/upload', (req, res, next) => {
+  console.log('🔥🔥🔥 REQUEST HIT /api/admin/upload 🔥🔥🔥');
+  console.log('📋 Method:', req.method);
+  console.log('📋 URL:', req.url);
+  console.log('📋 Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('📋 Content-Type:', req.headers['content-type']);
+  console.log('📋 Timestamp:', new Date().toISOString());
+  next();
+});
+
 // Health check
 app.get('/', (req, res) => {
   res.json({
