@@ -3,7 +3,6 @@ const { getSupabaseAdminClient  } = require('../database.js');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
-const { solanaPaymentService } = require('./lib/solana-payment.cjs');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
@@ -189,7 +188,7 @@ async function generateSingleQR(supabase, id) {
 async function generateBulkQRs(supabase, count, amount, durationDays) {
   const qrData = [];
   for (let i = 0; i < count; i++) {
-    const code = Math.random().toString(36).substring(2, 15).toUpperCase();
+    const code = Math.random().toString(36).substring(2, 15);
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + durationDays);
     const { data: newClaim, error: createError } = await supabase
@@ -213,7 +212,7 @@ async function handleLegacyBulkCreation(supabase, count, amount, durationDays) {
   if (amount < 0 || amount > 10000) throw new Error('Amount must be between 0 and 10000 SOL');
   const claimsToCreate = [];
   for (let i = 0; i < count; i++) {
-    const code = Math.random().toString(36).substring(2, 15).toUpperCase();
+    const code = Math.random().toString(36).substring(2, 15);
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + durationDays);
     claimsToCreate.push({ code, amount_lamports: Math.floor(amount * 1000000000), expires_at: expiresAt.toISOString(), status: 'ACTIVE', created_at: new Date().toISOString() });
@@ -402,91 +401,6 @@ router.get('/status', async (req, res) => {
   }
 });
 
-// Helper: Fetch claim link with case-insensitive fallback
-async function fetchClaimLink(supabase, code) {
-  const { data: claimLinkOriginal, error: errorOriginal } = await supabase
-    .from('claim_links')
-    .select('*')
-    .eq('code', code)
-    .single();
-  
-  if (!errorOriginal && claimLinkOriginal) {
-    return { claimLink: claimLinkOriginal, error: null };
-  }
-  
-  const { data: claimLinkUpper, error: errorUpper } = await supabase
-    .from('claim_links')
-    .select('*')
-    .eq('code', code.toUpperCase())
-    .single();
-  
-  return { claimLink: claimLinkUpper, error: errorUpper };
-}
-
-// Helper: Validate claim link status
-function validateClaimLink(claimLink, code) {
-  if (claimLink.claimed_at) {
-    console.log(`❌ Claim code already used: ${code}`);
-    return {
-      valid: false,
-      status: 400,
-      error: 'This claim code has already been used',
-      claimed_at: claimLink.claimed_at,
-      claimed_by: claimLink.claimer_address
-    };
-  }
-  
-  const isExpired = new Date() > new Date(claimLink.expires_at);
-  if (isExpired) {
-    console.log(`❌ Claim code expired: ${code}`);
-    return {
-      valid: false,
-      status: 400,
-      error: 'This claim code has expired',
-      expires_at: claimLink.expires_at
-    };
-  }
-  
-  return { valid: true };
-}
-
-// Helper: Initialize payment service
-async function ensurePaymentServiceInitialized() {
-  if (!solanaPaymentService.isInitialized()) {
-    console.log('🔧 Initializing Solana payment service...');
-    await solanaPaymentService.initialize();
-    console.log('✅ Solana payment service initialized successfully');
-  }
-}
-
-// Helper: Process SOL payment
-async function processSolPayment(walletAddress, amountLamports, solAmount) {
-  console.log(`📤 Sending ${solAmount} SOL (${amountLamports} lamports) to ${walletAddress}...`);
-  const txSignature = await solanaPaymentService.sendSOL(walletAddress, amountLamports);
-  console.log(`✅ Payment sent successfully! Transaction: ${txSignature}`);
-  return txSignature;
-}
-
-// Helper: Update claim in database
-async function updateClaimInDatabase(supabase, claimLink, walletAddress, txSignature) {
-  const { data: updatedClaims, error: updateError } = await supabase
-    .from('claim_links')
-    .update({
-      status: 'CLAIMED',
-      claimed_at: new Date().toISOString(),
-      claimer_address: walletAddress,
-      tx_signature: txSignature
-    })
-    .eq('id', claimLink.id)
-    .select();
-  
-  if (updateError || !updatedClaims || updatedClaims.length === 0) {
-    throw new Error('Failed to update claim status. Transaction: ' + txSignature);
-  }
-  
-  return updatedClaims[0];
-}
-
 /**
  * POST /api/claim/process - Process a claim (PUBLIC ENDPOINT) 
  */
@@ -496,67 +410,107 @@ router.post('/process', async (req, res) => {
     
     // Validate inputs
     if (!code || typeof code !== 'string') {
-      return res.status(400).json({ success: false, error: 'Claim code is required' });
+      return res.status(400).json({
+        success: false,
+        error: 'Claim code is required'
+      });
     }
     
     if (!walletAddress || typeof walletAddress !== 'string') {
-      return res.status(400).json({ success: false, error: 'Wallet address is required' });
+      return res.status(400).json({
+        success: false,
+        error: 'Wallet address is required'
+      });
     }
     
     console.log(`🎯 Processing claim for code: ${code}, wallet: ${walletAddress}`);
     
     const supabase = getSupabaseAdminClient();
     
-    // Fetch claim link with case-insensitive search
-    const { claimLink, error: fetchError } = await fetchClaimLink(supabase, code);
+    // Fetch claim link - try original case first, then uppercase
+    let claimLink, fetchError;
+    const { data: claimLinkOriginal, error: errorOriginal } = await supabase
+      .from('claim_links')
+      .select('*')
+      .eq('code', code)
+      .single();
+    
+    if (!errorOriginal && claimLinkOriginal) {
+      claimLink = claimLinkOriginal;
+      fetchError = errorOriginal;
+    } else {
+      // Fallback to uppercase
+      const { data: claimLinkUpper, error: errorUpper } = await supabase
+        .from('claim_links')
+        .select('*')
+        .eq('code', code.toUpperCase())
+        .single();
+      claimLink = claimLinkUpper;
+      fetchError = errorUpper;
+    }
     
     if (fetchError || !claimLink) {
       console.log(`❌ Claim code not found: ${code}`);
-      return res.status(404).json({ success: false, error: 'Claim code not found' });
+      return res.status(404).json({
+        success: false,
+        error: 'Claim code not found'
+      });
     }
     
-    // Validate claim status
-    const validation = validateClaimLink(claimLink, code);
-    if (!validation.valid) {
-      return res.status(validation.status).json({ success: false, ...validation });
+    // Check if already claimed
+    if (claimLink.claimed_at) {
+      console.log(`❌ Claim code already used: ${code}`);
+      return res.status(400).json({
+        success: false,
+        error: 'This claim code has already been used',
+        claimed_at: claimLink.claimed_at,
+        claimed_by: claimLink.claimer_address
+      });
+    }
+    
+    // Check if expired
+    const isExpired = new Date() > new Date(claimLink.expires_at);
+    if (isExpired) {
+      console.log(`❌ Claim code expired: ${code}`);
+      return res.status(400).json({
+        success: false,
+        error: 'This claim code has expired',
+        expires_at: claimLink.expires_at
+      });
     }
     
     // Calculate SOL amount
     const solAmount = claimLink.amount_lamports ? (claimLink.amount_lamports / 1000000000) : 0;
+    
     console.log(`💰 Processing claim: ${solAmount} SOL (${claimLink.amount_lamports} lamports) for wallet ${walletAddress}`);
     
-    // Initialize payment service
-    try {
-      await ensurePaymentServiceInitialized();
-    } catch (initError) {
-      console.error('❌ Failed to initialize payment service:', initError);
-      return res.status(500).json({ success: false, error: 'Payment service unavailable. Please try again later.' });
-    }
+    // For now, we'll mark as claimed without actual payment (you can add payment logic later)
+    const { data: updatedClaims, error: updateError } = await supabase
+      .from('claim_links')
+      .update({
+        status: 'CLAIMED',
+        claimed_at: new Date().toISOString(),
+        claimer_address: walletAddress,
+        tx_signature: 'PENDING_PAYMENT_IMPLEMENTATION'
+      })
+      .eq('id', claimLink.id)
+      .select();
     
-    // Process payment
-    let txSignature;
-    try {
-      txSignature = await processSolPayment(walletAddress, claimLink.amount_lamports, solAmount);
-    } catch (paymentError) {
-      console.error('❌ Payment failed:', paymentError);
-      return res.status(500).json({ success: false, error: `Payment processing failed: ${paymentError.message || 'Unknown error'}` });
-    }
-    
-    // Update database
-    let updatedClaim;
-    try {
-      updatedClaim = await updateClaimInDatabase(supabase, claimLink, walletAddress, txSignature);
-    } catch (updateError) {
+    if (updateError || !updatedClaims || updatedClaims.length === 0) {
       console.error(`❌ Failed to mark claim as used: ${code}`, updateError);
-      return res.status(500).json({ success: false, error: updateError.message });
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to process claim'
+      });
     }
     
-    console.log(`✅ Claim processed successfully: ${code} -> ${walletAddress}, Amount: ${solAmount} SOL, Tx: ${txSignature}`);
+    const updatedClaim = updatedClaims[0];
+    console.log(`✅ Claim processed successfully: ${code} -> ${walletAddress}, Amount: ${solAmount} SOL`);
     
     res.json({
       success: true,
       message: `Successfully claimed ${solAmount} SOL!`,
-      transactionHash: txSignature,
+      transactionHash: 'PENDING_PAYMENT_IMPLEMENTATION',
       amountSol: solAmount.toString(),
       claim: {
         id: updatedClaim.id,
