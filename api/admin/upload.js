@@ -46,40 +46,57 @@ function extractFile(files) {
 }
 
 async function createBunnyVideo(fileObj) {
-  const createRes = await fetch(
-    `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`,
-    {
-      method: 'POST',
-      headers: {
-        'AccessKey': String(BUNNY_API_KEY),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        title: fileObj.originalFilename || 'Untitled Video',
-      }),
-    }
-  );
-  const createResText = await createRes.text();
-  console.log('🐰 Bunny create video response:', createRes.status, createResText);
-  if (!createRes.ok) {
-    throw new Error(`Failed to create Bunny video entry: ${createResText}`);
-  }
-  let videoData;
   try {
-    videoData = JSON.parse(createResText);
-  } catch (parseError) {
-    console.error('❌ JSON parse error:', parseError);
-    throw new Error(`Failed to parse Bunny create video response: ${createResText}`);
+    const createRes = await fetch(
+      `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`,
+      {
+        method: 'POST',
+        headers: {
+          'AccessKey': String(BUNNY_API_KEY),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          title: fileObj.originalFilename || 'Untitled Video',
+        }),
+      }
+    );
+    const createResText = await createRes.text();
+    console.log('🐰 Bunny create video response:', createRes.status, createResText);
+    if (!createRes.ok) {
+      console.error('❌ Bunny create video failed:', createRes.status, createResText);
+      throw new Error(`Failed to create Bunny video entry: ${createResText}`);
+    }
+    let videoData;
+    try {
+      videoData = JSON.parse(createResText);
+    } catch (parseError) {
+      console.error('❌ JSON parse error:', parseError, createResText);
+      throw new Error(`Failed to parse Bunny create video response: ${createResText}`);
+    }
+    if (!videoData.guid) {
+      console.error('❌ Bunny create response missing guid:', videoData);
+      throw new Error(`Bunny create response missing videoId/guid: ${createResText}`);
+    }
+    return videoData.guid;
+  } catch (err) {
+    console.error('❌ createBunnyVideo error:', err);
+    throw err;
   }
-  return videoData.guid;
 }
 
 async function uploadBunnyFile(videoId, fileObj) {
   try {
     console.log('📁 Reading video file for upload...');
+    if (!fs.existsSync(fileObj.filepath)) {
+      console.error('❌ File does not exist:', fileObj.filepath);
+      throw new Error('File not found for upload: ' + fileObj.filepath);
+    }
     const videoBuffer = fs.readFileSync(fileObj.filepath);
     console.log('📏 Video file size:', videoBuffer.length, 'bytes');
-    
+    if (!videoBuffer || videoBuffer.length === 0) {
+      console.error('❌ Video buffer is empty');
+      throw new Error('Video buffer is empty');
+    }
     const uploadRes = await fetch(
       `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoId}`,
       {
@@ -91,23 +108,31 @@ async function uploadBunnyFile(videoId, fileObj) {
         body: videoBuffer
       }
     );
-    
     const uploadResText = await uploadRes.text();
     console.log('🐰 Bunny upload response:', uploadRes.status, uploadResText);
-    
     // Clean up the temporary file
-    fs.unlinkSync(fileObj.filepath);
-    
+    try {
+      fs.unlinkSync(fileObj.filepath);
+      console.log('✅ Temp file deleted:', fileObj.filepath);
+    } catch (unlinkErr) {
+      console.error('❌ Failed to delete temp file:', unlinkErr);
+    }
     if (!uploadRes.ok) {
+      console.error('❌ Bunny upload failed:', uploadRes.status, uploadResText);
       throw new Error(`Upload failed: ${uploadResText}`);
     }
-    
     console.log('✅ Video file uploaded to Bunny successfully');
   } catch (error) {
     // Make sure to clean up file even if upload fails
-    if (fs.existsSync(fileObj.filepath)) {
-      fs.unlinkSync(fileObj.filepath);
+    if (fileObj?.filepath && fs.existsSync(fileObj.filepath)) {
+      try {
+        fs.unlinkSync(fileObj.filepath);
+        console.log('✅ Temp file deleted after error:', fileObj.filepath);
+      } catch (unlinkErr) {
+        console.error('❌ Failed to delete temp file after error:', unlinkErr);
+      }
     }
+    console.error('❌ uploadBunnyFile error:', error);
     throw new Error(`Upload file error: ${error.message}`);
   }
 }
