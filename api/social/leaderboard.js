@@ -397,7 +397,7 @@ router.get('/config', async (req, res) => {
 router.put('/config/:key', async (req, res) => {
     try {
         const { key } = req.params;
-        const { value, description } = req.body;
+        const { value, description, category } = req.body;
         
         console.log(`⚙️  Updating config: ${key} = ${value}`);
         
@@ -406,6 +406,7 @@ router.put('/config/:key', async (req, res) => {
             .update({
                 config_value: String(value),
                 description: description,
+                category: category,
                 updated_at: new Date().toISOString()
             })
             .eq('config_key', key)
@@ -426,6 +427,207 @@ router.put('/config/:key', async (req, res) => {
         res.status(500).json({
             success: false,
             error: 'Failed to update configuration'
+        });
+    }
+});
+
+// =====================================================
+// CREATE NEW LEADERBOARD CONFIGURATION (ADMIN)
+// =====================================================
+router.post('/config', async (req, res) => {
+    try {
+        const { key, value, description, category, config_type } = req.body;
+        
+        if (!key || value === undefined) {
+            return res.status(400).json({
+                success: false,
+                error: 'Key and value are required'
+            });
+        }
+        
+        console.log(`⚙️  Creating new config: ${key} = ${value}`);
+        
+        const { data, error } = await supabase
+            .from('leaderboard_config')
+            .insert({
+                config_key: key,
+                config_value: String(value),
+                config_type: config_type || 'string',
+                category: category || 'general',
+                description: description,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            })
+            .select();
+        
+        if (error) throw error;
+        
+        console.log(`✅ Configuration created: ${key}`);
+        
+        res.json({
+            success: true,
+            message: 'Configuration created successfully',
+            data: data[0]
+        });
+        
+    } catch (error) {
+        console.error(`❌ Config creation error:`, error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to create configuration'
+        });
+    }
+});
+
+// =====================================================
+// DELETE LEADERBOARD CONFIGURATION (ADMIN)
+// =====================================================
+router.delete('/config/:key', async (req, res) => {
+    try {
+        const { key } = req.params;
+        
+        console.log(`🗑️  Deleting config: ${key}`);
+        
+        const { error } = await supabase
+            .from('leaderboard_config')
+            .delete()
+            .eq('config_key', key);
+        
+        if (error) throw error;
+        
+        console.log(`✅ Configuration deleted: ${key}`);
+        
+        res.json({
+            success: true,
+            message: 'Configuration deleted successfully'
+        });
+        
+    } catch (error) {
+        console.error(`❌ Config deletion error for ${req.params.key}:`, error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to delete configuration'
+        });
+    }
+});
+
+// =====================================================
+// POPULATE DEFAULT LEADERBOARD CONFIGURATION (ADMIN)
+// =====================================================
+router.post('/config/populate-defaults', async (req, res) => {
+    try {
+        console.log('🚀 Populating default leaderboard configuration...');
+        
+        const defaultConfigs = [
+            // Tweet Filtering
+            { key: 'filter_good_keywords', value: JSON.stringify(['WNEXTV2', 'WhatNext', 'What Next', '$WNEXT', 'bullish', 'moon', 'gem', 'LFG']), type: 'json', category: 'filtering', description: 'Keywords that indicate good tweets' },
+            { key: 'filter_bad_keywords', value: JSON.stringify(['gm', 'wen', 'pump', 'dump', 'scam', 'rug', 'bot', 'spam']), type: 'json', category: 'filtering', description: 'Keywords that indicate bad tweets' },
+            { key: 'filter_min_engagement', value: '3', type: 'number', category: 'filtering', description: 'Minimum total engagement (likes + retweets + replies) required' },
+            { key: 'filter_min_followers', value: '50', type: 'number', category: 'filtering', description: 'Minimum follower count for user to be eligible' },
+            { key: 'filter_require_follow', value: 'true', type: 'boolean', category: 'filtering', description: 'Require users to be followers' },
+            { key: 'filter_exclude_retweets', value: 'true', type: 'boolean', category: 'filtering', description: 'Exclude retweets from scoring' },
+            { key: 'filter_min_tweet_length', value: '30', type: 'number', category: 'filtering', description: 'Minimum tweet character length' },
+            { key: 'filter_max_tweet_age_hours', value: '168', type: 'number', category: 'filtering', description: 'Maximum tweet age in hours (7 days default)' },
+            
+            // Scoring System
+            { key: 'scoring_like_points', value: '1', type: 'number', category: 'scoring', description: 'Points awarded per like' },
+            { key: 'scoring_retweet_points', value: '3', type: 'number', category: 'scoring', description: 'Points awarded per retweet' },
+            { key: 'scoring_reply_points', value: '2', type: 'number', category: 'scoring', description: 'Points awarded per reply' },
+            { key: 'scoring_quote_points', value: '4', type: 'number', category: 'scoring', description: 'Points awarded per quote tweet' },
+            { key: 'scoring_keyword_bonus', value: '0.5', type: 'number', category: 'scoring', description: 'Bonus multiplier for each good keyword match' },
+            { key: 'scoring_follower_bonus', value: '1.2', type: 'number', category: 'scoring', description: 'Multiplier bonus for followers' },
+            { key: 'scoring_quality_weight', value: '0.7', type: 'number', category: 'scoring', description: 'Weight of quality score in final calculation' },
+            { key: 'scoring_engagement_weight', value: '0.3', type: 'number', category: 'scoring', description: 'Weight of engagement score in final calculation' },
+            
+            // Payout Settings
+            { key: 'payout_enabled', value: 'true', type: 'boolean', category: 'payouts', description: 'Enable automatic payouts' },
+            { key: 'payout_currency', value: 'SOL', type: 'string', category: 'payouts', description: 'Payout currency (SOL, USDC, etc.)' },
+            { key: 'payout_rank_1_amount', value: '10', type: 'number', category: 'payouts', description: 'First place payout amount' },
+            { key: 'payout_rank_2_amount', value: '5', type: 'number', category: 'payouts', description: 'Second place payout amount' },
+            { key: 'payout_rank_3_amount', value: '2', type: 'number', category: 'payouts', description: 'Third place payout amount' },
+            { key: 'payout_participation_bonus', value: '0.1', type: 'number', category: 'payouts', description: 'Bonus for all qualifying participants' },
+            { key: 'payout_frequency', value: 'weekly', type: 'string', category: 'payouts', description: 'Payout frequency (daily, weekly, monthly)' },
+            { key: 'payout_min_score_threshold', value: '10', type: 'number', category: 'payouts', description: 'Minimum score required for payouts' },
+            
+            // Quality Thresholds
+            { key: 'threshold_excellent_score', value: '50', type: 'number', category: 'thresholds', description: 'Score threshold for excellent quality' },
+            { key: 'threshold_good_score', value: '20', type: 'number', category: 'thresholds', description: 'Score threshold for good quality' },
+            { key: 'threshold_fair_score', value: '10', type: 'number', category: 'thresholds', description: 'Score threshold for fair quality' },
+            { key: 'threshold_min_qualifying_tweets', value: '3', type: 'number', category: 'thresholds', description: 'Minimum tweets required to qualify for leaderboard' },
+            { key: 'threshold_max_daily_tweets', value: '10', type: 'number', category: 'thresholds', description: 'Maximum tweets counted per day per user' },
+            
+            // System Settings
+            { key: 'system_update_interval_hours', value: '1', type: 'number', category: 'system', description: 'Hours between automatic leaderboard updates' },
+            { key: 'system_max_users_displayed', value: '100', type: 'number', category: 'system', description: 'Maximum users shown on public leaderboard' },
+            { key: 'system_enable_notifications', value: 'true', type: 'boolean', category: 'system', description: 'Enable Discord/Twitter notifications for winners' },
+            { key: 'system_debug_mode', value: 'false', type: 'boolean', category: 'system', description: 'Enable debug logging and verbose output' }
+        ];
+        
+        // Insert all default configurations
+        let insertedCount = 0;
+        let updatedCount = 0;
+        
+        for (const config of defaultConfigs) {
+            try {
+                // Try to update existing config
+                const { data: existingConfig } = await supabase
+                    .from('leaderboard_config')
+                    .select('config_key')
+                    .eq('config_key', config.key)
+                    .single();
+                
+                if (existingConfig) {
+                    // Update existing
+                    const { error: updateError } = await supabase
+                        .from('leaderboard_config')
+                        .update({
+                            config_value: config.value,
+                            config_type: config.type,
+                            category: config.category,
+                            description: config.description,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('config_key', config.key);
+                    
+                    if (!updateError) updatedCount++;
+                } else {
+                    // Insert new
+                    const { error: insertError } = await supabase
+                        .from('leaderboard_config')
+                        .insert({
+                            config_key: config.key,
+                            config_value: config.value,
+                            config_type: config.type,
+                            category: config.category,
+                            description: config.description,
+                            created_at: new Date().toISOString(),
+                            updated_at: new Date().toISOString()
+                        });
+                    
+                    if (!insertError) insertedCount++;
+                }
+            } catch (configError) {
+                console.error(`Error processing config ${config.key}:`, configError);
+            }
+        }
+        
+        console.log(`✅ Default configs populated: ${insertedCount} inserted, ${updatedCount} updated`);
+        
+        res.json({
+            success: true,
+            message: 'Default configuration populated successfully',
+            stats: {
+                inserted: insertedCount,
+                updated: updatedCount,
+                total: defaultConfigs.length
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Failed to populate default configuration:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to populate default configuration'
         });
     }
 });
