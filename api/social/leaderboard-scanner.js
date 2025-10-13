@@ -6,7 +6,7 @@ const { createClient } = require('@supabase/supabase-js');
 // Extends existing Twitter API system for engagement tracking
 // Integrates with social_media_stats and auto-update system
 
-const supabaseUrl = process.env.VITE_SUPABASE_URL;
+const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!supabaseUrl || !supabaseServiceKey) {
@@ -76,14 +76,38 @@ async function getLeaderboardConfig() {
 function getDefaultConfig() {
     return {
         scoring_like_points: 1,
-        scoring_retweet_points: 2,
-        scoring_reply_points: 3,
-        scoring_quote_points: 2,
-        filter_min_followers: 10,
+        scoring_retweet_points: 3,
+        scoring_reply_points: 2,
+        scoring_quote_points: 4,
+        scoring_keyword_bonus: 0.5,
+        scoring_follower_bonus: 1.2,
+        scoring_quality_weight: 0.7,
+        scoring_engagement_weight: 0.3,
+        filter_min_followers: 50,
         filter_require_follow: true,
         filter_exclude_retweets: true,
-        keywords_project: ['WNEXTV2', 'WhatNext', 'What Next', '$WNEXT'],
-        keywords_bonus: ['bullish', 'moon', 'gem', 'diamond hands', 'hodl', 'LFG'],
+        filter_min_engagement: 3,
+        filter_min_tweet_length: 30,
+        filter_max_tweet_age_hours: 168,
+        filter_good_keywords: ['WNEXTV2', 'WhatNext', 'What Next', '$WNEXT', 'bullish', 'moon', 'gem', 'LFG'],
+        filter_bad_keywords: ['gm', 'wen', 'pump', 'dump', 'scam', 'rug', 'bot', 'spam'],
+        payout_enabled: true,
+        payout_currency: 'SOL',
+        payout_rank_1_amount: 10,
+        payout_rank_2_amount: 5,
+        payout_rank_3_amount: 2,
+        payout_participation_bonus: 0.1,
+        payout_frequency: 'weekly',
+        payout_min_score_threshold: 10,
+        threshold_excellent_score: 50,
+        threshold_good_score: 20,
+        threshold_fair_score: 10,
+        threshold_min_qualifying_tweets: 3,
+        threshold_max_daily_tweets: 10,
+        system_update_interval_hours: 1,
+        system_max_users_displayed: 100,
+        system_enable_notifications: true,
+        system_debug_mode: false,
         leaderboard_max_display: 50,
         leaderboard_min_tweets: 1,
         update_enabled: true,
@@ -282,36 +306,94 @@ async function scanUserTweets(username, config, isFollower = false) {
 // =====================================================
 function analyzeTweet(tweet, config) {
     const text = tweet.text.toLowerCase();
-    const keywords = config.keywords_project.map(k => k.toLowerCase());
-    const bonusKeywords = config.keywords_bonus.map(k => k.toLowerCase());
     
-    // Check for project mentions
-    const mentionsProject = keywords.some(keyword => text.includes(keyword));
+    // Parse keyword arrays from config (they may be JSON strings)
+    let goodKeywords, badKeywords;
+    try {
+        goodKeywords = Array.isArray(config.filter_good_keywords) 
+            ? config.filter_good_keywords 
+            : JSON.parse(config.filter_good_keywords || '[]');
+        badKeywords = Array.isArray(config.filter_bad_keywords) 
+            ? config.filter_bad_keywords 
+            : JSON.parse(config.filter_bad_keywords || '[]');
+    } catch (e) {
+        // Fallback to default keywords if parsing fails
+        console.error('Error parsing keywords configuration:', e.message);
+        goodKeywords = ['WXT', 'WhatNext', 'What Next', '$WXT', 'bullish', 'moon', 'gem', 'LFG'];
+        badKeywords = ['gm', 'wen', 'pump', 'dump', 'scam', 'rug', 'bot', 'spam'];
+    }
+    
+    const goodKeywordsLower = goodKeywords.map(k => k.toLowerCase());
+    const badKeywordsLower = badKeywords.map(k => k.toLowerCase());
+    
+    // Check for project mentions (good keywords)
+    const goodMatches = goodKeywordsLower.filter(keyword => text.includes(keyword));
+    const mentionsProject = goodMatches.length > 0;
     
     if (!mentionsProject) {
-        return { mentionsProject: false, score: 0 };
+        return { 
+            mentionsProject: false, 
+            score: 0, 
+            isValidTweet: false,
+            badKeywordMatches: [],
+            filterReason: 'No project mention'
+        };
+    }
+    
+    // Check for bad keywords (spam filter)
+    const badMatches = badKeywordsLower.filter(keyword => text.includes(keyword));
+    const hasBadContent = badMatches.length > 0;
+    
+    // Filter out tweets that are too short
+    if (tweet.text.length < (config.filter_min_tweet_length || 30)) {
+        return { 
+            mentionsProject: false, 
+            score: 0, 
+            isValidTweet: false, 
+            reason: 'Too short',
+            badKeywordMatches: [],
+            filterReason: 'Too short'
+        };
     }
     
     // Calculate engagement score
     const metrics = tweet.public_metrics || {};
+    const totalEngagement = (metrics.like_count || 0) + (metrics.retweet_count || 0) + (metrics.reply_count || 0);
+    
+    // Check minimum engagement requirement
+    if (totalEngagement < (config.filter_min_engagement || 3)) {
+        return { 
+            mentionsProject: false, 
+            score: 0, 
+            isValidTweet: false, 
+            reason: 'Low engagement',
+            badKeywordMatches: [],
+            filterReason: 'Low engagement'
+        };
+    }
+    
     const engagementScore = 
-        (metrics.like_count || 0) * config.scoring_like_points +
-        (metrics.retweet_count || 0) * config.scoring_retweet_points +
-        (metrics.reply_count || 0) * config.scoring_reply_points +
-        (metrics.quote_count || 0) * config.scoring_quote_points;
+        (metrics.like_count || 0) * (config.scoring_like_points || 1) +
+        (metrics.retweet_count || 0) * (config.scoring_retweet_points || 3) +
+        (metrics.reply_count || 0) * (config.scoring_reply_points || 2) +
+        (metrics.quote_count || 0) * (config.scoring_quote_points || 4);
     
     // Calculate quality score based on content
     let qualityScore = 1.0; // Base score
     
-    // Bonus for including bonus keywords
-    const bonusMatches = bonusKeywords.filter(keyword => text.includes(keyword));
-    qualityScore += bonusMatches.length * 0.2;
+    // Penalty for bad keywords
+    if (hasBadContent) {
+        qualityScore -= badMatches.length * 0.5; // Significant penalty
+    }
     
-    // Bonus for longer, more detailed tweets
+    // Bonus for good keyword matches
+    qualityScore += goodMatches.length * (config.scoring_keyword_bonus || 0.5);
+    
+    // Length-based scoring
     if (tweet.text.length > 100) qualityScore += 0.3;
     if (tweet.text.length > 200) qualityScore += 0.2;
     
-    // Penalty for very short tweets
+    // Penalty for very short tweets (but still above minimum)
     if (tweet.text.length < 50) qualityScore -= 0.2;
     
     // Bonus for original content (not replies)
@@ -319,13 +401,23 @@ function analyzeTweet(tweet, config) {
         qualityScore += 0.3;
     }
     
+    // Check if tweet passes quality thresholds
+    const minQualityScore = config.threshold_fair_score || 10;
+    const finalScore = engagementScore * qualityScore;
+    const isValidTweet = !hasBadContent && finalScore >= minQualityScore;
+    
     return {
         mentionsProject: true,
+        isValidTweet: isValidTweet,
         engagementScore: engagementScore,
         qualityScore: Math.max(0.1, Math.min(5.0, qualityScore)), // Clamp between 0.1 and 5.0
-        keywordMatches: keywords.filter(keyword => text.includes(keyword)),
-        bonusMatches: bonusMatches,
-        metrics: metrics
+        finalScore: finalScore,
+        keywordMatches: goodMatches,
+        badMatches: badMatches,
+        badKeywordMatches: badMatches,
+        filterReason: !isValidTweet ? 'Failed quality check' : 'Valid',
+        metrics: metrics,
+        reason: !isValidTweet ? 'Failed quality check' : 'Valid'
     };
 }
 
@@ -355,6 +447,9 @@ async function saveTweetToDatabase(tweet, analysis) {
             is_retweet: tweet.referenced_tweets?.some(ref => ref.type === 'retweeted') || false,
             is_reply: tweet.referenced_tweets?.some(ref => ref.type === 'replied_to') || false,
             processed: true,
+            filter_reason: analysis.filterReason || null,
+            bad_keyword_matches: analysis.badKeywordMatches || [],
+            detected_at: new Date().toISOString(),
             raw_tweet_data: tweet
         };
         
@@ -378,7 +473,7 @@ async function updateEngagementScores() {
     try {
         console.log('📊 Updating engagement scores...');
         
-        // Get all users with tweets
+        // Get all users with valid tweets only
         const { data: tweetUsers, error: tweetsError } = await supabase
             .from('twitter_tweets')
             .select(`
@@ -387,10 +482,12 @@ async function updateEngagementScores() {
                 author_id,
                 engagement_score,
                 quality_score,
+                final_score,
+                is_valid_tweet,
                 created_at_twitter
             `)
             .eq('processed', true)
-            .eq('included_in_leaderboard', true);
+            .eq('is_valid_tweet', true);
         
         if (tweetsError) throw tweetsError;
         
