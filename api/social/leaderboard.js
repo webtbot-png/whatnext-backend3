@@ -15,6 +15,18 @@ if (!supabaseUrl || !supabaseServiceKey) {
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
 // =====================================================
+// HEALTH CHECK FOR LEADERBOARD API
+// =====================================================
+router.get('/health', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Leaderboard API is running',
+        timestamp: new Date().toISOString(),
+        endpoints: ['/', '/user/:username', '/stats', '/refresh']
+    });
+});
+
+// =====================================================
 // GET LEADERBOARD DATA
 // =====================================================
 router.get('/', async (req, res) => {
@@ -94,19 +106,25 @@ router.get('/', async (req, res) => {
         
         if (statsError) console.warn('Stats error:', statsError);
         
-        console.log(`✅ Fetched ${leaderboard.length} leaderboard entries`);
+        console.log(`✅ Fetched ${leaderboard?.length || 0} leaderboard entries`);
         
+        // Return data even if empty (for initial setup)
         res.json({
             success: true,
             data: {
-                leaderboard: leaderboard,
+                leaderboard: leaderboard || [],
                 pagination: {
-                    total: count,
+                    total: count || 0,
                     limit: parseInt(limit),
                     offset: parseInt(offset),
-                    hasMore: (parseInt(offset) + parseInt(limit)) < count
+                    hasMore: (parseInt(offset) + parseInt(limit)) < (count || 0)
                 },
-                stats: stats?.[0] || null,
+                stats: stats?.[0] || {
+                    total_participants: 0,
+                    total_tweets_processed: 0,
+                    total_engagement: 0,
+                    snapshot_timestamp: new Date().toISOString()
+                },
                 timeframe: timeframe,
                 lastUpdated: new Date().toISOString()
             }
