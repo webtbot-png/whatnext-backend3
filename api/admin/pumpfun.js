@@ -129,7 +129,17 @@ router.delete('/', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     const supabase = getSupabaseAdminClient();
-    // Step 0: Check what's currently in app_settings BEFORE delete
+    // Step 0: Get the current contract address BEFORE deletion for cascade cleanup
+    console.log('DELETE: Getting current contract address for cascade cleanup...');
+    const { data: currentContract } = await supabase
+      .from('app_settings')
+      .select('value')
+      .eq('key', 'pumpfun_contract_address')
+      .single();
+    const contractToDelete = currentContract?.value;
+    console.log('DELETE: Contract address to cascade delete:', contractToDelete);
+    
+    // Step 0.5: Check what's currently in app_settings BEFORE delete
     console.log('DELETE: Checking current app_settings entries...');
     const { data: beforeSettings } = await supabase
       .from('app_settings')
@@ -151,13 +161,15 @@ router.delete('/', async (req, res) => {
       .ilike('key', '%pumpfun%')
       .select();
     console.log('DELETE: Wildcard delete result:', { data: wildcardDelete, error: wildcardError });
-    // Third: FORCE delete any entries with the specific contract value (in case key is different)
-    const { data: valueDelete, error: valueError } = await supabase
-      .from('app_settings')
-      .delete()
-      .eq('value', '4CBToKTRKfBsv8RMfzMr6VfKQ8PLRYeG6RFGZmq4pump')
-      .select();
-    console.log('DELETE: Value-based delete result:', { data: valueDelete, error: valueError });
+    // Third: FORCE delete any entries with the retrieved contract value (in case key is different)
+    if (contractToDelete && contractToDelete !== 'YOUR_CONTRACT_ADDRESS_HERE') {
+      const { data: valueDelete, error: valueError } = await supabase
+        .from('app_settings')
+        .delete()
+        .eq('value', contractToDelete)
+        .select();
+      console.log('DELETE: Value-based delete result:', { data: valueDelete, error: valueError });
+    }
     // Step 1.5: Double-check deletion worked
     const { data: afterSettings } = await supabase
       .from('app_settings')
@@ -177,7 +189,41 @@ router.delete('/', async (req, res) => {
     if (verifySettings && verifySettings.length > 0) {
       console.log('DELETE: WARNING - Contract still exists after deletion!', verifySettings);
     }
-    // Step 2: Reset ALL pump.fun media URLs back to DYNAMIC_PUMPFUN_URL
+    // Step 2: CASCADE DELETE - Remove ALL revenue tracking data for this contract
+    if (contractToDelete && contractToDelete !== 'YOUR_CONTRACT_ADDRESS_HERE') {
+      console.log('DELETE: Attempting to delete revenue tracking data for:', contractToDelete);
+      const { data: deletedRevenue, error: revenueError } = await supabase
+        .from('revenue_tracking')
+        .delete()
+        .eq('contract_address', contractToDelete)
+        .select();
+      console.log('DELETE: Revenue tracking deletion result:', { data: deletedRevenue, error: revenueError });
+      
+      // Step 3: Remove contract from any giveaway entries (cascade cleanup)
+      console.log('DELETE: Attempting to clean giveaway entries for:', contractToDelete);
+      const { data: updatedGiveaways, error: giveawayError } = await supabase
+        .from('giveaway_entries')
+        .update({ 
+          contract_address: 'pump.fun',
+          updated_at: new Date().toISOString()
+        })
+        .eq('contract_address', contractToDelete)
+        .select();
+      console.log('DELETE: Giveaway entries update result:', { data: updatedGiveaways, error: giveawayError });
+
+      // Step 4: Remove contract from contract restrictions (cascade cleanup)
+      console.log('DELETE: Attempting to delete contract restrictions for:', contractToDelete);
+      const { data: deletedRestrictions, error: restrictionsError } = await supabase
+        .from('contract_restrictions')
+        .delete()
+        .eq('contract_address', contractToDelete)
+        .select();
+      console.log('DELETE: Contract restrictions deletion result:', { data: deletedRestrictions, error: restrictionsError });
+    } else {
+      console.log('DELETE: No valid contract address found for cascade cleanup');
+    }
+
+    // Step 5: Reset ALL pump.fun media URLs back to DYNAMIC_PUMPFUN_URL
     console.log('DELETE: Attempting to update media table...');
     const { data: updatedMedia, error: mediaError } = await supabase
       .from('media')
@@ -200,10 +246,13 @@ router.delete('/', async (req, res) => {
     }
     return res.json({
       success: true,
-      message: 'Contract address and all pump.fun media URLs cleared successfully',
+      message: 'Contract address and ALL associated data cleared successfully (settings, revenue tracking, giveaways, restrictions, media)',
       source: 'database',
       settingsDeleted: (exactDelete?.length || 0) + (wildcardDelete?.length || 0),
-      mediaUpdated: updatedMedia?.length || 0
+      mediaUpdated: updatedMedia?.length || 0,
+      contractDeleted: contractToDelete || 'none',
+      cleanupComplete: true,
+      tablesAffected: ['app_settings', 'revenue_tracking', 'giveaway_entries', 'contract_restrictions', 'media']
     });
   } catch (error) {
     console.error('PumpFun DELETE error:', error);
