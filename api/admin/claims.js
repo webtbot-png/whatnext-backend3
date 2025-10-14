@@ -3,6 +3,7 @@ const { getSupabaseAdminClient  } = require('../../database.js');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const { getCurrentSolPrice } = require('../../utils/sol-price.js');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
@@ -29,15 +30,12 @@ function verifyAdminToken(req) {
   }
 }
 
-// --- SOL PRICE HELPER ---
-async function getCurrentSolPrice() {
-  console.log('💰 Fetching real-time SOL price from CoinGecko...');
+// --- SOL PRICE HELPER --- (Now using shared utility)
+async function getLocalSolPrice() {
+  console.log('💰 Fetching real-time SOL price from shared utility...');
   try {
-    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-    if (!response.ok) throw new Error('Failed to fetch SOL price from CoinGecko');
-    const data = await response.json();
-    const price = data.solana?.usd;
-    if (!price || typeof price !== 'number') throw new Error('Invalid SOL price data from CoinGecko');
+    const price = await getCurrentSolPrice();
+    if (!price || typeof price !== 'number') throw new Error('Invalid SOL price data from shared utility');
     console.log(`💰 Real-time SOL price: $${price}`);
     return price;
   } catch (error) {
@@ -69,7 +67,7 @@ router.get('/', async (req, res) => {
         console.log('⚠️ Claim links table not found or error:', qrError.message);
         qrClaims = [];
       } else {
-        currentSolPrice = await getCurrentSolPrice();
+        currentSolPrice = await getLocalSolPrice();
         qrClaims = (qrData || []).map(entry => {
           const solAmount = entry.amount_lamports / 1000000000;
           const usdAmount = entry.amount_usd || (solAmount * currentSolPrice);
@@ -240,7 +238,7 @@ router.post('/qr', async (req, res) => {
     let solAmount = amount;
     if (typeof amount_usd === 'number' && amount_usd > 0) {
       try {
-        const solPrice = await getCurrentSolPrice();
+        const solPrice = await getLocalSolPrice();
         solAmount = amount_usd / solPrice;
       } catch (err) {
         console.log('❌ Failed to fetch live SOL price:', err);
