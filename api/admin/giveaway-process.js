@@ -192,16 +192,19 @@ async function ensurePaymentServiceInitialized() {
 }
 
 /**
- * Get SOL price in USD
+ * Get SOL price in USD from centralized endpoint
  */
 async function getSolPrice() {
   try {
-    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+    const response = await fetch('http://localhost:3001/api/ecosystem/pumpfun-fees');
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
     const data = await response.json();
-    return data.solana.usd;
+    return data.solPrice || 235;
   } catch (error) {
-    console.warn('⚠️ Failed to fetch SOL price, using default 150 USD', error);
-    return 150; // Fallback price
+    console.warn('⚠️ Failed to fetch SOL price from pumpfun-fees, using default 235 USD', error);
+    return 235; // Fallback price
   }
 }
 
