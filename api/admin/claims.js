@@ -1,9 +1,19 @@
 const express = require('express');
-const { getSupabaseAdminClient  } = require('../../database.js');
+const { getSupabaseAdminClient  } = require('../database.js');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
-const { getCurrentSolPrice } = require('../../utils/sol-price.js');
+const { getCurrentSolPrice } = require('../utils/sol-price.js');
+
+// Safe import of Solana payment service with fallback
+let solanaPaymentService = null;
+try {
+  const solanaModule = require('../lib/solana-payment.cjs');
+  solanaPaymentService = solanaModule.solanaPaymentService;
+  console.log('✅ Solana payment service imported successfully');
+} catch (error) {
+  console.warn('⚠️ Solana payment service not available, using fallback mode:', error.message);
+}
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
@@ -178,7 +188,7 @@ async function generateSingleQR(supabase, id) {
     console.log('❌ Claim not found:', error?.message);
     throw new Error(`Claim not found: ${error?.message}`);
   }
-  const claimUrl = `${process.env.FRONTEND_URL || 'https://web-production-061ff.up.railway.app'}/claim/${claim.code}`;
+  const claimUrl = `${process.env.FRONTEND_URL || 'https://whatnext-backend3-production.up.railway.app'}/claim/${claim.code}`;
   const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
   return { qrBuffer, qr: qrBuffer.toString('base64'), url: claimUrl, claim: { ...claim, amount_sol: claim.amount_lamports ? claim.amount_lamports / 1000000000 : 0 } };
 }
@@ -198,7 +208,7 @@ async function generateBulkQRs(supabase, count, amount, durationDays) {
       console.log(`❌ Failed to create claim ${i + 1}:`, createError.message);
       throw new Error(`Failed to create claim ${i + 1}: ${createError.message}`);
     }
-    const claimUrl = `${process.env.FRONTEND_URL || 'https://web-production-061ff.up.railway.app'}/claim/${newClaim.code}`;
+    const claimUrl = `${process.env.FRONTEND_URL || 'https://whatnext-backend3-production.up.railway.app'}/claim/${newClaim.code}`;
     const qrBuffer = await QRCode.toBuffer(claimUrl, { type: 'png', width: 512, margin: 2, color: { dark: '#000000', light: '#FFFFFF' } });
     qrData.push({ id: newClaim.id, code: newClaim.code, qr: qrBuffer.toString('base64'), url: claimUrl, amount_lamports: newClaim.amount_lamports, amount_sol: newClaim.amount_lamports / 1000000000 });
   }
@@ -310,8 +320,304 @@ router.delete('/', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/claim/status - Check claim status by code (PUBLIC ENDPOINT)
+ */
+router.get('/status', async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!code || typeof code !== 'string') {
+      return res.json({
+        success: true,
+        message: 'Claim status endpoint is operational',
+        status: 'online',
+        info: 'Provide a code parameter to check specific claim status',
+        example: '/api/claim/status?code=YOUR_CLAIM_CODE'
+      });
+    }
+    console.log(`🔍 Checking claim status for code: ${code}`);
+    const supabase = getSupabaseAdminClient();
+    
+    // Try original case first, then uppercase as fallback
+    let claimLink, error;
+    const { data: claimLinkOriginal, error: errorOriginal } = await supabase
+      .from('claim_links')
+      .select('*')
+      .eq('code', code)
+      .single();
+    
+    if (!errorOriginal && claimLinkOriginal) {
+      claimLink = claimLinkOriginal;
+      error = errorOriginal;
+    } else {
+      // Fallback to uppercase
+      const { data: claimLinkUpper, error: errorUpper } = await supabase
+        .from('claim_links')
+        .select('*')
+        .eq('code', code.toUpperCase())
+        .single();
+      claimLink = claimLinkUpper;
+      error = errorUpper;
+    }
+    console.log(`🔍 Database response for code ${code}:`, claimLink);
+    if (error || !claimLink) {
+      console.log(`❌ Claim code not found: ${code}`);
+      return res.status(404).json({
+        success: false,
+        error: 'Claim code not found'
+      });
+    }
+    if (claimLink.claimed_at) {
+      console.log(`❌ Claim code already used: ${code}`);
+      return res.status(400).json({
+        success: false,
+        error: 'This claim code has already been used',
+        claimed_at: claimLink.claimed_at,
+        claimed_by: claimLink.claimer_address
+      });
+    }
+    const isExpired = new Date() > new Date(claimLink.expires_at);
+    if (isExpired) {
+      console.log(`❌ Claim code expired: ${code}`);
+      return res.status(400).json({
+        success: false,
+        error: 'This claim code has expired',
+        expires_at: claimLink.expires_at
+      });
+    }
+    const solAmount = claimLink.amount_lamports ? (claimLink.amount_lamports / 1000000000) : 0;
+    console.log(`✅ Valid claim code: ${code}, Amount: ${solAmount} SOL`);
+    res.json({
+      success: true,
+      claim: {
+        id: claimLink.id,
+        code: claimLink.code,
+        amount_sol: solAmount,
+        amount_lamports: claimLink.amount_lamports,
+        description: claimLink.note,
+        expires_at: claimLink.expires_at,
+        created_at: claimLink.created_at
+      }
+    });
+  } catch (error) {
+    console.error('❌ Server error checking claim status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
+// --- HELPER FUNCTIONS FOR CLAIM PROCESSING ---
+function validateClaimInput(code, walletAddress) {
+  if (!code || typeof code !== 'string') {
+    return { isValid: false, error: 'Claim code is required' };
+  }
+  if (!walletAddress || typeof walletAddress !== 'string') {
+    return { isValid: false, error: 'Wallet address is required' };
+  }
+  return { isValid: true };
+}
+
+async function fetchClaimByCode(supabase, code) {
+  // Try original case first, then uppercase as fallback
+  const { data: claimLinkOriginal, error: errorOriginal } = await supabase
+    .from('claim_links')
+    .select('*')
+    .eq('code', code)
+    .single();
+  
+  if (!errorOriginal && claimLinkOriginal) {
+    return { claim: claimLinkOriginal, error: null };
+  }
+  
+  // Fallback to uppercase
+  const { data: claimLinkUpper, error: errorUpper } = await supabase
+    .from('claim_links')
+    .select('*')
+    .eq('code', code.toUpperCase())
+    .single();
+  
+  return { claim: claimLinkUpper, error: errorUpper };
+}
+
+function validateClaimEligibility(claimLink, code) {
+  if (!claimLink) {
+    console.log(`❌ Claim code not found: ${code}`);
+    return { isValid: false, error: 'Claim code not found', status: 404 };
+  }
+  
+  if (claimLink.claimed_at) {
+    console.log(`❌ Claim code already used: ${code}`);
+    return { 
+      isValid: false, 
+      error: 'This claim code has already been used',
+      status: 400,
+      details: { claimed_at: claimLink.claimed_at, claimed_by: claimLink.claimer_address }
+    };
+  }
+  
+  const isExpired = new Date() > new Date(claimLink.expires_at);
+  if (isExpired) {
+    console.log(`❌ Claim code expired: ${code}`);
+    return { 
+      isValid: false, 
+      error: 'This claim code has expired',
+      status: 400,
+      details: { expires_at: claimLink.expires_at }
+    };
+  }
+  
+  return { isValid: true };
+}
+
+async function processPayment(walletAddress, lamports, solAmount) {
+  if (!solanaPaymentService) {
+    console.error('❌ Payment service not available - claims cannot be processed');
+    return {
+      success: false,
+      error: 'Payment system temporarily unavailable',
+      details: 'Real SOL payments are required. Please try again later.',
+      status: 503
+    };
+  }
+
+  try {
+    console.log('💸 Processing real Solana payment...');
+    
+    if (!solanaPaymentService.isInitialized()) {
+      console.log('🔄 Initializing Solana payment service...');
+      await solanaPaymentService.initialize();
+    }
+
+    const transactionSignature = await solanaPaymentService.sendSOL(walletAddress, lamports);
+    console.log(`✅ REAL PAYMENT SUCCESSFUL! Signature: ${transactionSignature}`);
+    
+    return { success: true, transactionSignature };
+    
+  } catch (paymentError) {
+    console.error('❌ Real payment failed:', paymentError.message);
+    return {
+      success: false,
+      error: 'Payment processing failed',
+      details: `Unable to send ${solAmount} SOL to ${walletAddress}. ${paymentError.message}`,
+      status: 500
+    };
+  }
+}
+
+async function updateClaimRecord(supabase, claimId, walletAddress, transactionSignature) {
+  const { data: updatedClaims, error: updateError } = await supabase
+    .from('claim_links')
+    .update({
+      status: 'CLAIMED',
+      claimed_at: new Date().toISOString(),
+      claimer_address: walletAddress,
+      tx_signature: transactionSignature
+    })
+    .eq('id', claimId)
+    .select();
+  
+  if (updateError || !updatedClaims || updatedClaims.length === 0) {
+    return { success: false, error: updateError };
+  }
+  
+  return { success: true, claim: updatedClaims[0] };
+}
+
+function formatSuccessResponse(transactionSignature, solAmount, updatedClaim) {
+  return {
+    success: true,
+    message: `Successfully claimed ${solAmount} SOL!`,
+    transaction: {
+      signature: transactionSignature,
+      copyable: true,
+      solscanUrl: `https://solscan.io/tx/${transactionSignature}`,
+      explorerUrl: `https://explorer.solana.com/tx/${transactionSignature}`
+    },
+    amountSol: solAmount.toString(),
+    claim: {
+      id: updatedClaim.id,
+      code: updatedClaim.code,
+      amount_sol: solAmount,
+      amount_lamports: updatedClaim.amount_lamports,
+      description: updatedClaim.note,
+      claimed_at: updatedClaim.claimed_at,
+      claimed_by: updatedClaim.claimer_address,
+      tx_signature: updatedClaim.tx_signature
+    }
+  };
+}
+
+/**
+ * POST /api/claim/process - Process a claim (PUBLIC ENDPOINT) 
+ */
+router.post('/process', async (req, res) => {
+  try {
+    const { code, walletAddress } = req.body;
+    
+    // Validate inputs
+    const inputValidation = validateClaimInput(code, walletAddress);
+    if (!inputValidation.isValid) {
+      return res.status(400).json({ success: false, error: inputValidation.error });
+    }
+    
+    console.log(`🎯 Processing claim for code: ${code}, wallet: ${walletAddress}`);
+    const supabase = getSupabaseAdminClient();
+    
+    // Fetch claim
+    const { claim: claimLink } = await fetchClaimByCode(supabase, code);
+    
+    // Validate claim eligibility
+    const eligibilityCheck = validateClaimEligibility(claimLink, code);
+    if (!eligibilityCheck.isValid) {
+      return res.status(eligibilityCheck.status).json({
+        success: false,
+        error: eligibilityCheck.error,
+        ...eligibilityCheck.details
+      });
+    }
+    
+    // Calculate SOL amount
+    const solAmount = claimLink.amount_lamports ? (claimLink.amount_lamports / 1000000000) : 0;
+    console.log(`💰 Processing claim: ${solAmount} SOL (${claimLink.amount_lamports} lamports) for wallet ${walletAddress}`);
+    
+    // Process payment
+    const paymentResult = await processPayment(walletAddress, claimLink.amount_lamports, solAmount);
+    if (!paymentResult.success) {
+      return res.status(paymentResult.status).json({
+        success: false,
+        error: paymentResult.error,
+        details: paymentResult.details
+      });
+    }
+    
+    // Update claim record
+    const updateResult = await updateClaimRecord(supabase, claimLink.id, walletAddress, paymentResult.transactionSignature);
+    if (!updateResult.success) {
+      console.error(`❌ Failed to mark claim as used: ${code}`, updateResult.error);
+      return res.status(500).json({ success: false, error: 'Failed to process claim' });
+    }
+    
+    console.log(`✅ Claim processed successfully: ${code} -> ${walletAddress}, Amount: ${solAmount} SOL`);
+    
+    // Return success response with enhanced transaction info
+    res.json(formatSuccessResponse(paymentResult.transactionSignature, solAmount, updateResult.claim));
+    
+  } catch (error) {
+    console.error('❌ Server error processing claim:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+});
+
 console.log('📡 Claims router with REAL-TIME SOL PRICING initialized');
 console.log('📡 DELETE route registered at /api/admin/claims (DELETE /)');
+console.log('📡 PUBLIC endpoints: GET /status, POST /process');
 
 module.exports = router;
 
