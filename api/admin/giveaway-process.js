@@ -1,5 +1,6 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../../database.js');
+const { getCurrentSolPrice } = require('../../utils/sol-price.js');
 
 // Safe import of Solana payment service with fallback
 let solanaPaymentService = null;
@@ -192,18 +193,13 @@ async function ensurePaymentServiceInitialized() {
 }
 
 /**
- * Get SOL price in USD from centralized endpoint
+ * Get SOL price in USD from shared utility
  */
 async function getSolPrice() {
   try {
-    const response = await fetch('http://localhost:3001/api/ecosystem/pumpfun-fees');
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    const data = await response.json();
-    return data.solPrice || 235;
+    return await getCurrentSolPrice();
   } catch (error) {
-    console.warn('⚠️ Failed to fetch SOL price from pumpfun-fees, using default 235 USD', error);
+    console.warn('⚠️ Failed to fetch SOL price from shared utility, using default 235 USD', error);
     return 235; // Fallback price
   }
 }
