@@ -7,6 +7,9 @@ const router = express.Router();
 let cachedSOLPrice = null;
 const CACHE_DURATION = 60000; // 1 minute cache
 
+// Price fetching promise cache to prevent concurrent requests
+let pricePromise = null;
+
 /**
  * Fetches current SOL price from CoinGecko API with caching and rate limiting
  */
@@ -15,36 +18,75 @@ async function fetchSOLPrice() {
   if (cachedSOLPrice && (Date.now() - cachedSOLPrice.timestamp) < CACHE_DURATION) {
     return cachedSOLPrice.price;
   }
-  try {
-    const priceResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', {
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'WhatNext/1.0'
-      },
-      signal: AbortSignal.timeout(8000)
-    });
-    if (!priceResponse.ok) {
-      console.warn(`⚠️ CoinGecko API returned status ${priceResponse.status}`);
-      if (cachedSOLPrice?.price) return cachedSOLPrice.price;
-      throw new Error('CoinGecko API unavailable and no cached price');
+
+  // If a request is already in progress, wait for it
+  if (pricePromise) {
+    try {
+      return await pricePromise;
+    } catch (error) {
+      // If the cached promise failed, log the error and try again below
+      console.warn('⚠️ Cached price promise failed:', error instanceof Error ? error.message : 'Unknown error');
+      pricePromise = null;
     }
-    const priceData = await priceResponse.json();
-    const solPrice = priceData?.solana?.usd;
-    if (typeof solPrice === 'number' && solPrice > 0) {
-      console.log(`✅ SOL price fetched: $${solPrice}`);
-      cachedSOLPrice = { price: solPrice, timestamp: Date.now() };
-      return solPrice;
-    } else {
-      console.warn('⚠️ Invalid SOL price data received');
-      if (cachedSOLPrice?.price) return cachedSOLPrice.price;
-      throw new Error('CoinGecko API unavailable and no cached price');
-    }
-  } catch (error) {
-    console.warn('⚠️ Failed to fetch SOL price:', error instanceof Error ? error.message : 'Unknown error');
-    if (cachedSOLPrice?.price) return cachedSOLPrice.price;
-    throw new Error('CoinGecko API unavailable and no cached price');
   }
+
+  // Create new request promise
+  pricePromise = (async () => {
+    try {
+      const priceResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'WhatNext/1.0'
+        },
+        signal: AbortSignal.timeout(8000)
+      });
+      
+      if (!priceResponse.ok) {
+        console.warn(`⚠️ CoinGecko API returned status ${priceResponse.status}`);
+        if (cachedSOLPrice?.price) {
+          console.log(`🔄 Using cached SOL price: $${cachedSOLPrice.price}`);
+          return cachedSOLPrice.price;
+        }
+        throw new Error(`CoinGecko API error: ${priceResponse.status}`);
+      }
+      
+      const priceData = await priceResponse.json();
+      const solPrice = priceData?.solana?.usd;
+      
+      if (typeof solPrice === 'number' && solPrice > 0) {
+        console.log(`✅ SOL price fetched: $${solPrice}`);
+        cachedSOLPrice = { price: solPrice, timestamp: Date.now() };
+        return solPrice;
+      } else {
+        console.warn('⚠️ Invalid SOL price data received:', priceData);
+        if (cachedSOLPrice?.price) {
+          console.log(`🔄 Using cached SOL price: $${cachedSOLPrice.price}`);
+          return cachedSOLPrice.price;
+        }
+        throw new Error('Invalid price data from CoinGecko');
+      }
+    } catch (error) {
+      console.warn('⚠️ Failed to fetch SOL price:', error instanceof Error ? error.message : 'Unknown error');
+      
+      // Return cached price if available, otherwise use fallback
+      if (cachedSOLPrice?.price) {
+        console.log(`🔄 Using cached SOL price: $${cachedSOLPrice.price}`);
+        return cachedSOLPrice.price;
+      }
+      
+      // Use fallback price
+      const fallbackPrice = 235;
+      console.log(`🔄 Using fallback SOL price: $${fallbackPrice}`);
+      cachedSOLPrice = { price: fallbackPrice, timestamp: Date.now() };
+      return fallbackPrice;
+    } finally {
+      // Clear the promise after completion
+      pricePromise = null;
+    }
+  })();
+
+  return pricePromise;
 }
 
 /**
