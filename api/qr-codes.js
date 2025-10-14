@@ -1,5 +1,7 @@
 const express = require('express');
+const QRCode = require('qrcode');
 const { getSupabaseAdminClient } = require('../database.js');
+const { getCurrentSolPrice } = require('../utils/sol-price.js');
 
 const router = express.Router();
 
@@ -29,15 +31,10 @@ router.get('/', async (req, res) => {
 
     console.log(`✅ Found ${claimLinks?.length || 0} QR codes in database`);
 
-    // Fetch live SOL price for USD conversions - WITH FALLBACK
-    let solPrice = 177.66; // Default fallback price
+    // Fetch live SOL price for USD conversions - FROM SHARED UTILITY
+    let solPrice = 235; // Default fallback price
     try {
-      const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-      if (!response.ok) {
-        throw new Error(`CoinGecko API failed with status: ${response.status}`);
-      }
-      const data = await response.json();
-      const livePrice = data.solana?.usd;
+      const livePrice = await getCurrentSolPrice();
       if (livePrice && livePrice > 0) {
         solPrice = livePrice;
         console.log(`✅ Live SOL price fetched: $${solPrice}`);
