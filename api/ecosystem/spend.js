@@ -1,19 +1,8 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../../database.js');
+const { getCurrentSolPrice } = require('../../utils/sol-price.js');
 
 const router = express.Router();
-
-// Use existing SOL price function (simplified to avoid duplication)
-async function getCurrentSolPrice() {
-  try {
-    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-    const data = await response.json();
-    return data.solana?.usd || 210; // Use same default as existing function
-  } catch (error) {
-    console.log('⚠️ Failed to fetch SOL price, using fallback:', error);
-    return 210; // Fallback price
-  }
-}
 
 /**
  * GET /api/ecosystem/spend
