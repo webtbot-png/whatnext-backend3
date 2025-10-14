@@ -1,6 +1,7 @@
 const express = require('express');
 const { getSupabaseAdminClient  } = require('../../database.js');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const { getCurrentSolPrice } = require('../../utils/sol-price.js');
 
 // Safe import of Solana payment service with fallback
 let solanaPaymentService = null;
@@ -77,14 +78,12 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Get current SOL price for USD value
-    let solPrice = 225; // Default fallback
+    // Get current SOL price for USD value from shared utility
+    let solPrice = 235; // Default fallback
     try {
-      const solPriceResponse = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-      const solPriceData = await solPriceResponse.json();
-      solPrice = solPriceData.solana.usd;
+      solPrice = await getCurrentSolPrice();
     } catch (priceError) {
-      console.warn('⚠️ Failed to fetch SOL price, using default:', priceError);
+      console.warn('⚠️ Failed to fetch SOL price from shared utility, using default:', priceError);
     }
 
     const usdValue = amountSol * solPrice;
