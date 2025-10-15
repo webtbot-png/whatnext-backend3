@@ -41,18 +41,16 @@ function verifyAdminToken(req) {
 
 // --- SOL PRICE HELPER ---
 async function getCurrentSolPrice() {
-  console.log('💰 Fetching real-time SOL price from CoinGecko...');
+  console.log('💰 Fetching real-time SOL price from shared utility...');
   try {
-    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-    if (!response.ok) throw new Error('Failed to fetch SOL price from CoinGecko');
-    const data = await response.json();
-    const price = data.solana?.usd;
-    if (!price || typeof price !== 'number') throw new Error('Invalid SOL price data from CoinGecko');
+    const { getCurrentSolPrice: getPrice } = require('../utils/sol-price.js');
+    const price = await getPrice();
+    if (!price || typeof price !== 'number') throw new Error('Invalid SOL price from shared utility');
     console.log(`💰 Real-time SOL price: $${price}`);
     return price;
   } catch (error) {
-    console.warn(`⚠️ Failed to fetch live SOL price: ${error.message}, using fallback: $177.66`);
-    return 177.66; // Fallback price
+    console.warn(`⚠️ Failed to fetch live SOL price: ${error.message}, using fallback: $200`);
+    return 200; // Updated fallback price
   }
 }
 
