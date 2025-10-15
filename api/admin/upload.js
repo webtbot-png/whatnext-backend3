@@ -438,6 +438,7 @@ async function handleUpload(req, res) {
     url: req.url,
     contentType: req.headers['content-type'],
     contentLength: req.headers['content-length'],
+    expectedSize: req.headers['content-length'] ? `${(parseInt(req.headers['content-length']) / (1024 * 1024)).toFixed(2)} MB` : 'unknown',
     userAgent: req.headers['user-agent'],
     timestamp: new Date().toISOString()
   });
@@ -525,6 +526,8 @@ async function handleUpload(req, res) {
         }
         
         console.log(`✅ File accepted: ${originalFilename} (${mimetype})`);
+        console.log(`📊 Expected file size from headers: ${req.headers['content-length'] ? (parseInt(req.headers['content-length']) / (1024 * 1024)).toFixed(2) + ' MB' : 'unknown'}`);
+        console.log(`🔍 Large file upload detected - using extended timeouts`);
         return true;
       }
     });
@@ -539,13 +542,33 @@ async function handleUpload(req, res) {
     });
   }
 
+    // Add extended timeout for large files (30 minutes for 1GB+ uploads)
+  const uploadTimeout = setTimeout(() => {
+    console.error('❌ Upload timeout - taking too long, aborting');
+    console.error('💾 Expected large file upload, timeout after 30 minutes');
+    if (!res.headersSent) {
+      res.status(408).json({ 
+        error: 'Upload timeout', 
+        message: 'Large file upload took too long and was aborted',
+        timeout: '30 minutes',
+        expectedSize: 'up to 2GB'
+      });
+    }
+  }, 30 * 60 * 1000); // 30 minute timeout for large files
+
   form.parse(req, async (err, fields, files) => {
+    // Clear timeout on completion
+    clearTimeout(uploadTimeout);
+    
     if (err) {
-      console.error('❌ Formidable parsing error:', {
+      console.error('❌ Formidable parse error:', err);
+      console.error('❌ Error details:', {
         message: err.message,
         code: err.code,
         stack: err.stack,
-        httpCode: err.httpCode,
+        formidableVersion: require('formidable/package.json').version,
+        nodeVersion: process.version,
+        platform: process.platform,
         tempDir: tempDir,
         processEnv: {
           NODE_ENV: process.env.NODE_ENV,
@@ -562,16 +585,42 @@ async function handleUpload(req, res) {
       });
     }
     console.log('🔍 Formidable parsed files:', files);
+    console.log('🎯 CHECKPOINT 1: File parsing completed');
+    
     const fileObj = extractFile(files);
     console.log('🔍 fileObj:', fileObj);
+    console.log('🎯 CHECKPOINT 2: File extraction completed');
+    
+    // Check if file was truncated during upload
+    if (fileObj && fileObj.size && req.headers['content-length']) {
+      const expectedSize = parseInt(req.headers['content-length']);
+      const actualSize = fileObj.size;
+      const sizeDifference = expectedSize - actualSize;
+      
+      console.log(`📊 File size analysis:`);
+      console.log(`   Expected: ${(expectedSize / (1024 * 1024)).toFixed(2)} MB`);
+      console.log(`   Received: ${(actualSize / (1024 * 1024)).toFixed(2)} MB`);
+      console.log(`   Difference: ${(sizeDifference / (1024 * 1024)).toFixed(2)} MB`);
+      
+      if (sizeDifference > 1024 * 1024) { // More than 1MB difference
+        console.log(`⚠️ WARNING: Large file size difference detected - possible truncation!`);
+        console.log(`⚠️ This suggests Railway platform limits or network timeout`);
+      }
+    }
+    
     if (fileObj === undefined || fileObj === null) {
+      console.log('❌ CHECKPOINT 2.1: No file object found');
       return res.status(400).json({ error: 'No file uploaded (parsed files: ' + JSON.stringify(files) + ', fileObj: ' + JSON.stringify(fileObj) + ')'});
     }
+    
+    console.log('🎯 CHECKPOINT 3: File validation starting');
     if (!isAllowedExtension(fileObj.originalFilename)) {
       const allowedExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
+      console.log('❌ CHECKPOINT 3.1: Invalid file extension');
       return res.status(400).json({ error: 'Invalid file extension. Allowed: ' + allowedExtensions.join(', ') });
     }
     
+    console.log('🎯 CHECKPOINT 4: Content entry ID extraction starting');
     // Extract contentEntryId from fields (could be array or string)
     let contentEntryId = fields.contentEntryId || fields.content_entry_id || fields.id;
     if (Array.isArray(contentEntryId)) {
@@ -579,13 +628,17 @@ async function handleUpload(req, res) {
     }
     
     console.log('🔍 Content Entry ID:', contentEntryId);
+    console.log('🎯 CHECKPOINT 5: Content entry ID extracted');
     
     if (!contentEntryId) {
+      console.log('❌ CHECKPOINT 5.1: Missing content entry ID');
       return res.status(400).json({ error: 'Missing content entry ID. Please provide contentEntryId in the upload form.' });
     }
     
+    console.log('🎯 CHECKPOINT 6: Starting Bunny CDN upload process');
     try {
       console.log('🎬 Creating Bunny.net video entry...');
+      console.log('🎯 CHECKPOINT 7: About to call createBunnyVideo');
       console.log('📋 File details:', {
         originalFilename: fileObj.originalFilename,
         filepath: fileObj.filepath,
