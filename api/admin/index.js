@@ -20,7 +20,6 @@ try {
   router.use('/schedules', require('./schedules.js'));
   router.use('/locations', require('./locations.js'));
   router.use('/social', require('./social.js'));
-  router.use('/ecosystem', require('./ecosystem.js'));
   router.use('/pumpfun', require('./pumpfun.js'));
   router.use('/live-stream', require('./live-stream.js'));
   router.use('/toggle-live', require('./toggle-live.js'));
@@ -32,6 +31,14 @@ try {
   console.log('✅ All admin routes loaded');
 } catch (error) {
   console.log('⚠️ Some admin routes failed to load:', error.message);
+}
+
+// Mount ecosystem separately to ensure it loads even if other routes fail
+try {
+  router.use('/ecosystem', require('./ecosystem.js'));
+  console.log('✅ Ecosystem routes loaded successfully');
+} catch (error) {
+  console.error('❌ Failed to load ecosystem routes:', error);
 }
 
 // Health check for admin
