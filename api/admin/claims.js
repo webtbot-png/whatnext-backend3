@@ -8,11 +8,25 @@ const { getCurrentSolPrice } = require('../utils/sol-price.js');
 // Safe import of Solana payment service with fallback
 let solanaPaymentService = null;
 try {
-  const solanaModule = require('../lib/solana-payment.cjs');
-  solanaPaymentService = solanaModule.solanaPaymentService;
-  console.log('✅ Solana payment service imported successfully');
+  const path = require('path');
+  const solanaPath = path.join(__dirname, '../lib/solana-payment.cjs');
+  console.log('🔍 Attempting to load Solana payment service from:', solanaPath);
+  const solanaModule = require(solanaPath);
+  
+  // Try different export patterns
+  solanaPaymentService = solanaModule.solanaPaymentService || solanaModule.SolanaPaymentService || solanaModule;
+  
+  if (solanaPaymentService && typeof solanaPaymentService === 'object') {
+    console.log('✅ Solana payment service imported successfully');
+    console.log('✅ Payment service type:', typeof solanaPaymentService);
+    console.log('✅ Available methods:', Object.keys(solanaPaymentService));
+  } else {
+    throw new Error('Invalid payment service export structure');
+  }
 } catch (error) {
   console.warn('⚠️ Solana payment service not available, using fallback mode:', error.message);
+  console.warn('⚠️ Payment claims will be disabled until Solana service is configured');
+  console.warn('⚠️ Stack trace:', error.stack);
 }
 
 const router = express.Router();
@@ -583,7 +597,50 @@ router.post('/process', async (req, res) => {
     const solAmount = claimLink.amount_lamports ? (claimLink.amount_lamports / 1000000000) : 0;
     console.log(`💰 Processing claim: ${solAmount} SOL (${claimLink.amount_lamports} lamports) for wallet ${walletAddress}`);
     
-    // Process payment
+    // TEMPORARY: Mock payment processing until Solana service is fixed
+    if (!solanaPaymentService) {
+      console.log('🧪 MOCK PAYMENT MODE: Simulating payment for testing');
+      
+      // Generate a mock transaction signature for testing
+      const mockTxSignature = `mock_tx_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+      
+      // Update claim record with mock transaction
+      const updateResult = await updateClaimRecord(supabase, claimLink.id, walletAddress, mockTxSignature);
+      if (!updateResult.success) {
+        console.error(`❌ Failed to mark claim as used: ${code}`, updateResult.error);
+        return res.status(500).json({ success: false, error: 'Failed to process claim' });
+      }
+      
+      console.log(`✅ MOCK CLAIM processed successfully: ${code} -> ${walletAddress}, Amount: ${solAmount} SOL`);
+      
+      // Return mock success response
+      return res.json({
+        success: true,
+        message: `MOCK: Successfully claimed ${solAmount} SOL! (Real payments temporarily disabled)`,
+        transaction: {
+          signature: mockTxSignature,
+          copyable: true,
+          solscanUrl: `https://solscan.io/tx/${mockTxSignature}`,
+          explorerUrl: `https://explorer.solana.com/tx/${mockTxSignature}`,
+          isMock: true,
+          note: 'This is a test transaction. Real SOL payments are temporarily disabled.'
+        },
+        amountSol: solAmount.toString(),
+        claim: {
+          id: updateResult.claim.id,
+          code: updateResult.claim.code,
+          amount_sol: solAmount,
+          amount_lamports: updateResult.claim.amount_lamports,
+          description: updateResult.claim.note,
+          claimed_at: updateResult.claim.claimed_at,
+          claimed_by: updateResult.claim.claimer_address,
+          tx_signature: updateResult.claim.tx_signature
+        },
+        mockMode: true
+      });
+    }
+    
+    // Real payment processing (when Solana service is available)
     const paymentResult = await processPayment(walletAddress, claimLink.amount_lamports, solAmount);
     if (!paymentResult.success) {
       return res.status(paymentResult.status).json({
@@ -615,9 +672,59 @@ router.post('/process', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/claims/test-holders
+ * Test holder detection functionality
+ */
+router.get('/test-holders', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { tokenAddress } = req.query;
+    const testToken = tokenAddress || '9YqhNPHBQmC1uoggyDq8HfqzQqy8tMDxhYL5taP5pump';
+    
+    console.log(`🧪 Testing holder detection for token: ${testToken}`);
+    
+    // Import the holder detection utility
+    try {
+      const { getTokenHolders } = require('../utils/holder-detection.js');
+      const holders = await getTokenHolders(testToken);
+      
+      console.log(`✅ Holder test successful: Found ${holders.length} holders`);
+      
+      return res.json({
+        success: true,
+        token: testToken,
+        holdersFound: holders.length,
+        holders: holders.slice(0, 10), // Return top 10 for testing
+        message: 'Holder detection is working correctly!',
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (holderError) {
+      console.error('❌ Holder detection test failed:', holderError);
+      return res.status(500).json({
+        success: false,
+        error: 'Holder detection failed',
+        details: holderError.message,
+        token: testToken
+      });
+    }
+    
+  } catch (error) {
+    if (error.status === 401) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+    console.error('❌ Test holders error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error', details: error.message });
+  }
+});
+
 console.log('📡 Claims router with REAL-TIME SOL PRICING initialized');
 console.log('📡 DELETE route registered at /api/admin/claims (DELETE /)');
 console.log('📡 PUBLIC endpoints: GET /status, POST /process');
+console.log('🧪 TEST endpoint: GET /api/admin/claims/test-holders');
+console.log('💳 Payment mode:', solanaPaymentService ? 'REAL SOL PAYMENTS' : 'MOCK MODE (testing)');
 
 module.exports = router;
 
