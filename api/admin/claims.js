@@ -9,7 +9,7 @@ const { getCurrentSolPrice } = require('../utils/sol-price.js');
 let solanaPaymentService = null;
 try {
   const path = require('path');
-  const solanaPath = path.join(__dirname, '../lib/solana-payment.cjs');
+  const solanaPath = path.join(__dirname, '../../lib/solana-payment.cjs');
   console.log('🔍 Attempting to load Solana payment service from:', solanaPath);
   const solanaModule = require(solanaPath);
   
@@ -672,58 +672,11 @@ router.post('/process', async (req, res) => {
   }
 });
 
-/**
- * GET /api/admin/claims/test-holders
- * Test holder detection functionality
- */
-router.get('/test-holders', async (req, res) => {
-  try {
-    verifyAdminToken(req);
-    
-    const { tokenAddress } = req.query;
-    const testToken = tokenAddress || '9YqhNPHBQmC1uoggyDq8HfqzQqy8tMDxhYL5taP5pump';
-    
-    console.log(`🧪 Testing holder detection for token: ${testToken}`);
-    
-    // Import the holder detection utility
-    try {
-      const { getTokenHolders } = require('../utils/holder-detection.js');
-      const holders = await getTokenHolders(testToken);
-      
-      console.log(`✅ Holder test successful: Found ${holders.length} holders`);
-      
-      return res.json({
-        success: true,
-        token: testToken,
-        holdersFound: holders.length,
-        holders: holders.slice(0, 10), // Return top 10 for testing
-        message: 'Holder detection is working correctly!',
-        timestamp: new Date().toISOString()
-      });
-      
-    } catch (holderError) {
-      console.error('❌ Holder detection test failed:', holderError);
-      return res.status(500).json({
-        success: false,
-        error: 'Holder detection failed',
-        details: holderError.message,
-        token: testToken
-      });
-    }
-    
-  } catch (error) {
-    if (error.status === 401) {
-      return res.status(401).json({ success: false, error: 'Unauthorized' });
-    }
-    console.error('❌ Test holders error:', error);
-    return res.status(500).json({ success: false, error: 'Internal server error', details: error.message });
-  }
-});
+
 
 console.log('📡 Claims router with REAL-TIME SOL PRICING initialized');
 console.log('📡 DELETE route registered at /api/admin/claims (DELETE /)');
 console.log('📡 PUBLIC endpoints: GET /status, POST /process');
-console.log('🧪 TEST endpoint: GET /api/admin/claims/test-holders');
 console.log('💳 Payment mode:', solanaPaymentService ? 'REAL SOL PAYMENTS' : 'MOCK MODE (testing)');
 
 module.exports = router;
