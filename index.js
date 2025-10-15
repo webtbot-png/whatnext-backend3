@@ -26,6 +26,9 @@ app.use('/api/admin/upload', (req, res, next) => {
   next();
 }, require('./api/admin/upload.js'));
 
+// UPLOAD CREDENTIALS ROUTE - For direct uploads
+app.use('/api/admin/upload', require('./api/admin/upload-credentials.js'));
+
 // Middleware - EXCLUDE upload routes from JSON parsing
 app.use((req, res, next) => {
   // Skip JSON parsing for file upload routes
