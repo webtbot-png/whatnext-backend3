@@ -1,5 +1,5 @@
 const express = require('express');
-const { getSupabaseAdminClient  } = require('../database.js');
+const { getSupabaseAdminClient  } = require('../../database.js');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
