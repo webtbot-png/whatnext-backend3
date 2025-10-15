@@ -15,8 +15,25 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Cache-Control', 'Pragma', 'Expires']
 }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Middleware - EXCLUDE upload routes from JSON parsing
+app.use((req, res, next) => {
+  // Skip JSON parsing for file upload routes
+  if (req.path.includes('/upload')) {
+    console.log('🚫 Skipping JSON parsing for upload route:', req.path);
+    return next();
+  }
+  // Apply JSON parsing to all other routes
+  express.json({ limit: '2gb' })(req, res, next);
+});
+
+app.use((req, res, next) => {
+  // Skip URL encoding for file upload routes  
+  if (req.path.includes('/upload')) {
+    return next();
+  }
+  // Apply URL encoding to all other routes
+  express.urlencoded({ extended: true, limit: '2gb' })(req, res, next);
+});
 
 // CRITICAL UPLOAD DEBUGGING - Log ALL requests to /api/admin/upload
 app.use('/api/admin/upload', (req, res, next) => {
