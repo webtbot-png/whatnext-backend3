@@ -176,6 +176,52 @@ router.get('/', async (req, res) => {
 });
 
 /**
+ * Helper function to check if error indicates table doesn't exist
+ */
+function isTableNotExistError(error) {
+  return error && (
+    error.message.includes('PGRST205') || 
+    error.message.includes('relation') || 
+    error.message.includes('does not exist')
+  );
+}
+
+/**
+ * Helper function to check if error is a "not found" error (safe to ignore)
+ */
+function isNotFoundError(error) {
+  return error && error.message.includes('PGRST116');
+}
+
+/**
+ * Helper function to attempt deletion from a specific table
+ */
+async function tryDeleteFromTable(supabase, tableName, id, actualId = null) {
+  const deleteId = actualId || id;
+  const { data, error } = await supabase
+    .from(tableName)
+    .delete()
+    .eq('id', deleteId)
+    .select();
+
+  if (isTableNotExistError(error)) {
+    console.log(`⚠️ ${tableName} table does not exist, skipping...`);
+    return { success: false, tableNotExists: true };
+  }
+
+  if (error && !isNotFoundError(error)) {
+    console.error(`❌ Error deleting from ${tableName}:`, error);
+    return { success: false, error: error.message };
+  }
+
+  if (!data || data.length === 0) {
+    return { success: false, notFound: true };
+  }
+
+  return { success: true, data: data[0] };
+}
+
+/**
  * DELETE /api/ecosystem/spend/:id
  * Delete a single spending entry
  */
@@ -186,100 +232,77 @@ router.delete('/:id', async (req, res) => {
     const supabase = getSupabaseAdminClient();
 
     // Try to delete from spend_log first
-    const { data: deletedSpend, error: spendError } = await supabase
-      .from('spend_log')
-      .delete()
-      .eq('id', id)
-      .select();
-
-    // Handle database table not existing
-    if (spendError && (spendError.message.includes('PGRST205') || spendError.message.includes('relation') || spendError.message.includes('does not exist'))) {
-      console.log('⚠️ spend_log table does not exist, skipping...');
-    } else if (spendError && !spendError.message.includes('PGRST116')) {
-      console.error('❌ Error deleting from spend_log:', spendError);
+    const spendResult = await tryDeleteFromTable(supabase, 'spend_log', id);
+    if (spendResult.error) {
       return res.status(500).json({
         success: false,
         error: 'Failed to delete spending entry',
-        details: spendError.message
+        details: spendResult.error
       });
     }
 
-    // If not found in spend_log, try giveaway_payouts
-    if (!deletedSpend || deletedSpend.length === 0) {
-      const { data: deletedPayout, error: payoutError } = await supabase
-        .from('giveaway_payouts')
-        .delete()
-        .eq('id', id)
-        .select();
+    if (spendResult.success) {
+      console.log(`✅ Deleted spending entry ID: ${id}`);
+      return res.json({
+        success: true,
+        message: 'Spending entry deleted successfully',
+        deletedEntry: spendResult.data
+      });
+    }
 
-      // Handle database table not existing
-      if (payoutError && (payoutError.message.includes('PGRST205') || payoutError.message.includes('relation') || payoutError.message.includes('does not exist'))) {
-        console.log('⚠️ giveaway_payouts table does not exist, skipping...');
-      } else if (payoutError && !payoutError.message.includes('PGRST116')) {
-        console.error('❌ Error deleting from giveaway_payouts:', payoutError);
-        return res.status(500).json({
-          success: false,
-          error: 'Failed to delete giveaway payout',
-          details: payoutError.message
-        });
-      }
+    // Try giveaway_payouts table
+    const payoutResult = await tryDeleteFromTable(supabase, 'giveaway_payouts', id);
+    if (payoutResult.error) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to delete giveaway payout',
+        details: payoutResult.error
+      });
+    }
 
-      if (!deletedPayout || deletedPayout.length === 0) {
-        // Try claim_links for QR claims (extract actual ID from claim_X format)
-        const actualId = id.startsWith('claim_') ? id.replace('claim_', '') : id;
-        const { data: deletedClaim, error: claimError } = await supabase
-          .from('claim_links')
-          .delete()
-          .eq('id', actualId)
-          .select();
-
-        // Handle database table not existing
-        if (claimError && (claimError.message.includes('PGRST205') || claimError.message.includes('relation') || claimError.message.includes('does not exist'))) {
-          console.log('⚠️ claim_links table does not exist, skipping...');
-          // All tables checked, return not found
-          return res.status(404).json({
-            success: false,
-            error: 'Entry not found',
-            message: `No spending entry found with ID: ${id} (database tables not configured)`
-          });
-        } else if (claimError && !claimError.message.includes('PGRST116')) {
-          console.error('❌ Error deleting from claim_links:', claimError);
-          return res.status(500).json({
-            success: false,
-            error: 'Failed to delete claim entry',
-            details: claimError.message
-          });
-        }
-
-        if (!deletedClaim || deletedClaim.length === 0) {
-          return res.status(404).json({
-            success: false,
-            error: 'Entry not found',
-            message: `No spending entry found with ID: ${id}`
-          });
-        }
-
-        console.log(`✅ Deleted claim entry ID: ${id}`);
-        return res.json({
-          success: true,
-          message: `Claim entry deleted successfully`,
-          deletedEntry: deletedClaim[0]
-        });
-      }
-
+    if (payoutResult.success) {
       console.log(`✅ Deleted giveaway payout ID: ${id}`);
       return res.json({
         success: true,
-        message: `Giveaway payout deleted successfully`,
-        deletedEntry: deletedPayout[0]
+        message: 'Giveaway payout deleted successfully',
+        deletedEntry: payoutResult.data
       });
     }
 
-    console.log(`✅ Deleted spending entry ID: ${id}`);
-    return res.json({
-      success: true,
-      message: `Spending entry deleted successfully`,
-      deletedEntry: deletedSpend[0]
+    // Try claim_links table (handle claim_X format)
+    const actualId = id.startsWith('claim_') ? id.replace('claim_', '') : id;
+    const claimResult = await tryDeleteFromTable(supabase, 'claim_links', id, actualId);
+    
+    if (claimResult.error) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to delete claim entry',
+        details: claimResult.error
+      });
+    }
+
+    if (claimResult.tableNotExists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Entry not found',
+        message: `No spending entry found with ID: ${id} (database tables not configured)`
+      });
+    }
+
+    if (claimResult.success) {
+      console.log(`✅ Deleted claim entry ID: ${id}`);
+      return res.json({
+        success: true,
+        message: 'Claim entry deleted successfully',
+        deletedEntry: claimResult.data
+      });
+    }
+
+    // Entry not found in any table
+    return res.status(404).json({
+      success: false,
+      error: 'Entry not found',
+      message: `No spending entry found with ID: ${id}`
     });
 
   } catch (error) {
