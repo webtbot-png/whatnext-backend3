@@ -11,7 +11,7 @@ function verifyAdminToken(req) {
     throw new Error('Unauthorized');
   }
   const token = authHeader.substring(7);
-  jwt.verify(token, JWT_SECRET);
+  jwt.verify(token, JWT_SECRET); 
 }
 
 /**
