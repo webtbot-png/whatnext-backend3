@@ -378,7 +378,7 @@ router.get('/test', (req, res) => {
           keepExtensions: true,
           maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB for testing
           allowedExtensions: ALLOWED_EXTENSIONS,
-          enabledPlugins: [],  // No additional plugins for security
+          enabledPlugins: ['octetstream', 'multipart', 'json'],  // Enable required plugins
           filename: function(name, ext, part, form) {
             // Validate extension before accepting filename
             if (!ALLOWED_EXTENSIONS.includes(ext.toLowerCase())) {
@@ -495,7 +495,7 @@ async function handleUpload(req, res) {
       maxFieldsSize: 2 * 1024 * 1024, // 2MB for fields
       hashAlgorithm: false,
       allowedExtensions: ALLOWED_EXTENSIONS,
-      enabledPlugins: [],  // No additional plugins for security
+      enabledPlugins: ['octetstream', 'multipart', 'json'],  // Enable required plugins
       filename: function(name, ext, part, form) {
         // Validate extension before accepting filename
         if (!ALLOWED_EXTENSIONS.includes(ext.toLowerCase())) {
