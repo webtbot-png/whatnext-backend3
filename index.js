@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const { initializeDatabase } = require('./database.js');
 
 const app = express();
@@ -203,6 +204,33 @@ const mountRoutes = () => {
 // Mount all routes
 mountRoutes();
 
+// Serve static files from the React build
+const frontendPath = path.join(__dirname, '..', '..', 'dist');
+console.log(`📁 Serving static files from: ${frontendPath}`);
+app.use(express.static(frontendPath));
+
+// Serve React app for all non-API routes (SPA fallback)
+app.get('*', (req, res, next) => {
+  // Skip API routes
+  if (req.path.startsWith('/api/')) {
+    return next();
+  }
+  
+  // Serve React app
+  const indexPath = path.join(frontendPath, 'index.html');
+  console.log(`🎯 Serving React app: ${req.path} -> ${indexPath}`);
+  res.sendFile(indexPath, (err) => {
+    if (err) {
+      console.error(`❌ Error serving React app:`, err);
+      res.status(500).json({
+        error: 'Frontend not found',
+        message: 'Could not serve React application',
+        path: req.path
+      });
+    }
+  });
+});
+
 // Error handling
 app.use((err, req, res, next) => {
   console.error('Error:', err);
@@ -213,11 +241,11 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
+// 404 handler for API routes only
+app.use('/api/*', (req, res) => {
   res.status(404).json({ 
-    error: 'Not Found',
-    message: `Route ${req.originalUrl} not found`,
+    error: 'API Not Found',
+    message: `API route ${req.originalUrl} not found`,
     timestamp: new Date().toISOString()
   });
 });
