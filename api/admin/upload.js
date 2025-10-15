@@ -52,12 +52,21 @@ function isAllowedFileType(originalFilename, mimetype) {
 }
 
 function verifyAdminToken(req) {
+  console.log('🔐 Verifying admin token for upload...');
+  console.log('Authorization header:', req.headers.authorization);
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    console.log('❌ No Bearer token provided');
     throw new Error('Unauthorized');
   }
   const token = authHeader.substring(7);
-  jwt.verify(token, JWT_SECRET);
+  try {
+    jwt.verify(token, JWT_SECRET);
+    console.log('✅ Upload token verified successfully');
+  } catch (e) {
+    console.log('❌ Upload token verification failed:', e);
+    throw new Error('Invalid token');
+  }
 }
 
 const BUNNY_LIBRARY_ID = process.env.BUNNY_LIBRARY_ID;
@@ -367,7 +376,7 @@ router.get('/test', (req, res) => {
         testFormidable({
           uploadDir: '/tmp',
           keepExtensions: true,
-          maxFileSize: 50 * 1024 * 1024,
+          maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB for testing
           allowedExtensions: ALLOWED_EXTENSIONS,
           enabledPlugins: [],  // No additional plugins for security
           filename: function(name, ext, part, form) {
@@ -423,11 +432,6 @@ router.post('/', async (req, res) => {
 });
 
 async function handleUpload(req, res) {
-  // Add error handler for any uncaught errors
-  process.on('uncaughtException', (error) => {
-    console.error('❌ UNCAUGHT EXCEPTION IN UPLOAD:', error);
-  });
-  
   console.log('🚀🚀🚀 UPLOAD ENDPOINT HIT! 🚀🚀🚀');
   console.log('🔥🔥🔥 SUPER CRITICAL LOG - UPLOAD STARTING 🔥🔥🔥');
   console.log('📋 Request details:', {
@@ -444,8 +448,12 @@ async function handleUpload(req, res) {
     verifyAdminToken(req);
     console.log('✅ Admin authentication verified for upload');
   } catch (authError) {
-    console.error('❌ Authentication failed:', authError.message);
-    return res.status(401).json({ error: 'Unauthorized' });
+    console.error('❌ Authentication failed for upload:', authError.message);
+    return res.status(401).json({ 
+      error: 'Unauthorized',
+      details: 'Valid authentication token required for file uploads',
+      timestamp: new Date().toISOString()
+    });
   }
 
   // Check Bunny CDN configuration
@@ -482,8 +490,8 @@ async function handleUpload(req, res) {
       multiples: false,
       uploadDir: tempDir,
       keepExtensions: true,
-      maxFileSize: 100 * 1024 * 1024, // 100MB max
-      maxTotalFileSize: 100 * 1024 * 1024,
+      maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB max
+      maxTotalFileSize: 2 * 1024 * 1024 * 1024, // 2GB total
       maxFieldsSize: 2 * 1024 * 1024, // 2MB for fields
       hashAlgorithm: false,
       allowedExtensions: ALLOWED_EXTENSIONS,
