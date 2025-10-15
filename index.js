@@ -15,11 +15,21 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Cache-Control', 'Pragma', 'Expires']
 }));
+
+// UPLOAD ROUTE - MOUNTED FIRST TO BYPASS ALL MIDDLEWARE
+app.use('/api/admin/upload', (req, res, next) => {
+  console.log('🔥🔥🔥 UPLOAD ROUTE HIT FIRST - BYPASSING ALL MIDDLEWARE 🔥🔥🔥');
+  console.log('📋 Method:', req.method);
+  console.log('📋 URL:', req.url);
+  console.log('📋 Content-Type:', req.headers['content-type']);
+  next();
+}, require('./api/admin/upload.js'));
+
 // Middleware - EXCLUDE upload routes from JSON parsing
 app.use((req, res, next) => {
   // Skip JSON parsing for file upload routes
-  if (req.path.includes('/upload')) {
-    console.log('🚫 Skipping JSON parsing for upload route:', req.path);
+  if (req.path.includes('/upload') || req.url.includes('/upload')) {
+    console.log('🚫 Skipping JSON parsing for upload route:', req.path, req.url);
     return next();
   }
   // Apply JSON parsing to all other routes
@@ -28,22 +38,12 @@ app.use((req, res, next) => {
 
 app.use((req, res, next) => {
   // Skip URL encoding for file upload routes  
-  if (req.path.includes('/upload')) {
+  if (req.path.includes('/upload') || req.url.includes('/upload')) {
+    console.log('🚫 Skipping URL encoding for upload route:', req.path, req.url);
     return next();
   }
   // Apply URL encoding to all other routes
   express.urlencoded({ extended: true, limit: '2gb' })(req, res, next);
-});
-
-// CRITICAL UPLOAD DEBUGGING - Log ALL requests to /api/admin/upload
-app.use('/api/admin/upload', (req, res, next) => {
-  console.log('🔥🔥🔥 REQUEST HIT /api/admin/upload 🔥🔥🔥');
-  console.log('📋 Method:', req.method);
-  console.log('📋 URL:', req.url);
-  console.log('📋 Headers:', JSON.stringify(req.headers, null, 2));
-  console.log('📋 Content-Type:', req.headers['content-type']);
-  console.log('📋 Timestamp:', new Date().toISOString());
-  next();
 });
 
 // Health check
@@ -143,7 +143,6 @@ const getRouteDefinitions = () => {
     { path: '/api/admin/social/update-followers', file: './api/admin/social/update-followers.js' },
     { path: '/api/admin/stats', file: './api/admin/stats.js' },
     { path: '/api/admin/toggle-live', file: './api/admin/toggle-live.js' },
-    { path: '/api/admin/upload', file: './api/admin/upload.js' },
     { path: '/api/admin/users', file: './api/admin/users.js' },
     
     // Analytics routes
