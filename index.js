@@ -21,7 +21,6 @@ try {
   router.use('/locations', require('./locations.js'));
   router.use('/social', require('./social.js'));
   router.use('/ecosystem', require('./ecosystem.js'));
-  router.use('/ecosystem-reset', require('./ecosystem-reset.js'));
   router.use('/pumpfun', require('./pumpfun.js'));
   router.use('/live-stream', require('./live-stream.js'));
   router.use('/toggle-live', require('./toggle-live.js'));
