@@ -5,6 +5,15 @@ const jwt = require('jsonwebtoken');
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
 
+// Add a basic test route to verify ecosystem is working
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Ecosystem router is working',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // Mount debug router for Railway troubleshooting
 // Temporarily disabled until railway-debug.js is created
 // try {
@@ -28,6 +37,7 @@ try {
   console.log('   POST   /api/admin/ecosystem/spend/bulk');
 } catch (error) {
   console.error('❌ Failed to load ecosystem/spend router:', error);
+  // Don't let this failure prevent the rest of ecosystem from loading
 }
 
 function verifyAdminToken(req) {
