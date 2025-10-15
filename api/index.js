@@ -1,85 +1,51 @@
 const express = require('express');
-const cors = require('cors');
+const router = express.Router();
 
-// Create Express app
-const app = express();
+// Mount all admin routes
+try {
+  router.use('/login', require('./login.js'));
+  router.use('/dashboard', require('./dashboard.js'));
+  router.use('/users', require('./users.js'));
+  router.use('/settings', require('./settings.js'));
+  router.use('/analytics', require('./analytics.js'));
+  router.use('/content', require('./content.js'));
+  router.use('/media', require('./media.js'));
+  router.use('/upload', require('./upload.js'));
+  router.use('/giveaway', require('./giveaway.js'));
+  router.use('/giveaway-process', require('./giveaway-process.js'));
+  router.use('/giveaway-payout', require('./giveaway-payout.js'));
+  router.use('/claims', require('./claims.js'));
+  router.use('/stats', require('./stats.js'));
+  router.use('/roadmap', require('./roadmap.js'));
+  router.use('/schedules', require('./schedules.js'));
+  router.use('/locations', require('./locations.js'));
+  router.use('/social', require('./social.js'));
+  router.use('/ecosystem', require('./ecosystem.js'));
+  router.use('/ecosystem', require('./ecosystem-reset.js'));
+  router.use('/pumpfun', require('./pumpfun.js'));
+  router.use('/live-stream', require('./live-stream.js'));
+  router.use('/toggle-live', require('./toggle-live.js'));
+  router.use('/add-password', require('./add-password.js'));
+  router.use('/api-config', require('./api-config.js'));
+  router.use('/populate-settings', require('./populate-settings.js'));
+  router.use('/force-populate-settings', require('./force-populate-settings.js'));
+  
+  console.log('✅ All admin routes loaded');
+} catch (error) {
+  console.log('⚠️ Some admin routes failed to load:', error.message);
+}
 
-// CORS configuration
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-// Body parsing middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Basic health check
-app.get('/', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'WhatNext Backend API - Vercel Deployment',
-    timestamp: new Date().toISOString(),
-    platform: 'Vercel',
-    version: '1.0.1'
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    platform: 'Vercel'
-  });
-});
-
-app.get('/api', (req, res) => {
+// Health check for admin
+router.get('/', (req, res) => {
   res.json({
-    message: 'WhatNext API is operational',
-    endpoints: ['/', '/health', '/api'],
-    timestamp: new Date().toISOString()
+    message: 'Admin API operational',
+    timestamp: new Date().toISOString(),
+    availableEndpoints: [
+      '/login', '/dashboard', '/users', '/settings', '/analytics',
+      '/content', '/media', '/upload', '/giveaway', '/claims', '/stats',
+      '/ecosystem', '/ecosystem/spend'
+    ]
   });
 });
 
-// Test database connection endpoint
-app.get('/api/test-db', async (req, res) => {
-  try {
-    // Basic test without complex imports
-    res.json({
-      status: 'Database connection test',
-      environment: {
-        hasSupabaseUrl: !!process.env.SUPABASE_URL,
-        hasSupabaseKey: !!process.env.SUPABASE_ANON_KEY,
-        nodeEnv: process.env.NODE_ENV
-      },
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: 'Database test failed',
-      message: error.message
-    });
-  }
-});
-
-// Error handling
-app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  res.status(500).json({ 
-    error: 'Internal Server Error',
-    message: err.message,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Not Found',
-    message: `Route ${req.originalUrl} not found`,
-    timestamp: new Date().toISOString()
-  });
-});
-
-module.exports = app;
+module.exports = router;
