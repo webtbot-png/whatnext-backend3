@@ -1,7 +1,7 @@
 {
   "name": "whatnext-backend-clean",
   "version": "1.0.0",
-  "type": "commonjs",
+  "type": "module",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -30,3 +30,4 @@
     "node": "20.x"
   }
 }
+
