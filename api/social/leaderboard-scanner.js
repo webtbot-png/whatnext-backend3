@@ -47,12 +47,12 @@ async function getLeaderboardConfig() {
         if (error) throw error;
         
         const config = {};
-        data.forEach(item => {
+        for (const item of data) {
             let value = item.config_value;
             
             // Parse based on type
             if (item.config_type === 'number') {
-                value = parseFloat(value);
+                value = Number.parseFloat(value);
             } else if (item.config_type === 'boolean') {
                 value = value.toLowerCase() === 'true';
             } else if (item.config_type === 'json') {
@@ -64,7 +64,7 @@ async function getLeaderboardConfig() {
             }
             
             config[item.config_key] = value;
-        });
+        }
         
         return config;
     } catch (error) {
@@ -379,7 +379,7 @@ function analyzeTweet(tweet, config) {
         (metrics.quote_count || 0) * (config.scoring_quote_points || 4);
     
     // Calculate quality score based on content
-    let qualityScore = 1.0; // Base score
+    let qualityScore = 1; // Base score
     
     // Penalty for bad keywords
     if (hasBadContent) {
@@ -410,14 +410,14 @@ function analyzeTweet(tweet, config) {
         mentionsProject: true,
         isValidTweet: isValidTweet,
         engagementScore: engagementScore,
-        qualityScore: Math.max(0.1, Math.min(5.0, qualityScore)), // Clamp between 0.1 and 5.0
+        qualityScore: Math.max(0.1, Math.min(5, qualityScore)), // Clamp between 0.1 and 5
         finalScore: finalScore,
         keywordMatches: goodMatches,
         badMatches: badMatches,
         badKeywordMatches: badMatches,
-        filterReason: !isValidTweet ? 'Failed quality check' : 'Valid',
+        filterReason: isValidTweet ? 'Valid' : 'Failed quality check',
         metrics: metrics,
-        reason: !isValidTweet ? 'Failed quality check' : 'Valid'
+        reason: isValidTweet ? 'Valid' : 'Failed quality check'
     };
 }
 
@@ -494,7 +494,7 @@ async function updateEngagementScores() {
         // Group by user and calculate aggregated scores
         const userStats = {};
         
-        tweetUsers.forEach(tweet => {
+        for (const tweet of tweetUsers) {
             const username = tweet.author_username;
             
             if (!userStats[username]) {
@@ -521,7 +521,7 @@ async function updateEngagementScores() {
             if (new Date(tweet.created_at_twitter) > new Date(stats.lastTweet)) {
                 stats.lastTweet = tweet.created_at_twitter;
             }
-        });
+        }
         
         // Update engagement_scores table
         for (const [username, stats] of Object.entries(userStats)) {
@@ -795,13 +795,12 @@ module.exports = {
 // DIRECT EXECUTION SUPPORT
 // =====================================================
 if (require.main === module) {
-    runLeaderboardScan()
-        .then(result => {
-            console.log('Final result:', result);
-            process.exit(result.success ? 0 : 1);
-        })
-        .catch(error => {
-            console.error('Fatal error:', error);
-            process.exit(1);
-        });
+    try {
+        const result = await runLeaderboardScan();
+        console.log('Final result:', result);
+        process.exit(result.success ? 0 : 1);
+    } catch (error) {
+        console.error('Fatal error:', error);
+        process.exit(1);
+    }
 }
