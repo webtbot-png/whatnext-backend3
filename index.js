@@ -1,13 +1,17 @@
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
+const path = require('node:path');
 const { initializeDatabase } = require('./database.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Initialize database
-initializeDatabase().catch(console.error);
+try {
+    await initializeDatabase();
+} catch (error) {
+    console.error(error);
+}
 
 // Middleware
 app.use(cors({
@@ -82,7 +86,9 @@ const loadRoute = (route, loadedRoutes, routeType = '') => {
 
 // Helper function to load routes array
 const loadRoutesArray = (routes, loadedRoutes, routeType = '') => {
-  routes.forEach(route => loadRoute(route, loadedRoutes, routeType));
+  for (const route of routes) {
+    loadRoute(route, loadedRoutes, routeType);
+  }
 };
 
 // Get route definitions
