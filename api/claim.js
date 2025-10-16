@@ -309,7 +309,7 @@ router.delete('/', async (req, res) => {
     }
     const deletedCount = deletedClaims?.length || 0;
     console.log(`✅ Successfully deleted ${deletedCount} claims`);
-    return res.json({ success: true, message: `Successfully deleted ${deletedCount} claim${deletedCount !== 1 ? 's' : ''}`, deletedCount, deletedClaims: deletedClaims || [] });
+    return res.json({ success: true, message: `Successfully deleted ${deletedCount} claim${deletedCount === 1 ? '' : 's'}`, deletedCount, deletedClaims: deletedClaims || [] });
   } catch (error) {
     if (error.status === 401) {
       console.error('❌ Authentication error:', error.message);
