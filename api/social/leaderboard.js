@@ -83,7 +83,7 @@ router.get('/', async (req, res) => {
         }
         
         // Apply pagination
-        query = query.range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
+        query = query.range(Number.parseInt(offset), Number.parseInt(offset) + Number.parseInt(limit) - 1);
         
         const { data: leaderboard, error } = await query;
         
@@ -115,9 +115,9 @@ router.get('/', async (req, res) => {
                 leaderboard: leaderboard || [],
                 pagination: {
                     total: count || 0,
-                    limit: parseInt(limit),
-                    offset: parseInt(offset),
-                    hasMore: (parseInt(offset) + parseInt(limit)) < (count || 0)
+                    limit: Number.parseInt(limit),
+                    offset: Number.parseInt(offset),
+                    hasMore: (Number.parseInt(offset) + Number.parseInt(limit)) < (count || 0)
                 },
                 stats: stats?.[0] || {
                     total_participants: 0,
@@ -287,7 +287,7 @@ router.get('/history', async (req, res) => {
         const { days = 7 } = req.query;
         console.log(`📊 Fetching ${days} days of historical data...`);
         
-        const startDate = new Date(Date.now() - parseInt(days) * 24 * 60 * 60 * 1000);
+        const startDate = new Date(Date.now() - Number.parseInt(days) * 24 * 60 * 60 * 1000);
         
         const { data: snapshots, error } = await supabase
             .from('leaderboard_snapshots')
@@ -304,7 +304,7 @@ router.get('/history', async (req, res) => {
             data: {
                 snapshots: snapshots,
                 period: {
-                    days: parseInt(days),
+                    days: Number.parseInt(days),
                     startDate: startDate.toISOString(),
                     endDate: new Date().toISOString()
                 }
