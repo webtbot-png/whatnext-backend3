@@ -60,8 +60,8 @@ async function fetchCreatorFees(contractAddress) {
       throw new Error(`PumpFun API returned status ${response.status}: ${response.statusText}`);
     }
     const data = await response.json();
-    const totalFeesSOL = parseFloat(data.totalFeesSOL || data.totalFees || 0);
-    if (isNaN(totalFeesSOL) || totalFeesSOL < 0) {
+    const totalFeesSOL = Number.parseFloat(data.totalFeesSOL || data.totalFees || 0);
+    if (Number.isNaN(totalFeesSOL) || totalFeesSOL < 0) {
       throw new Error('Invalid fees data received from PumpFun API');
     }
     console.log(`✅ Creator fees: ${totalFeesSOL.toFixed(6)} SOL`);
