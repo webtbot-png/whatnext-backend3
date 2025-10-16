@@ -8,7 +8,7 @@ const { getCurrentSolPrice } = require('../utils/sol-price.js');
 // Safe import of Solana payment service with fallback
 let solanaPaymentService = null;
 try {
-  const path = require('path');
+  const path = require('node:path');
   const solanaPath = path.join(__dirname, '../../lib/solana-payment.cjs');
   console.log('🔍 Attempting to load Solana payment service from:', solanaPath);
   const solanaModule = require(solanaPath);
@@ -323,7 +323,7 @@ router.delete('/', async (req, res) => {
     }
     const deletedCount = deletedClaims?.length || 0;
     console.log(`✅ Successfully deleted ${deletedCount} claims`);
-    return res.json({ success: true, message: `Successfully deleted ${deletedCount} claim${deletedCount !== 1 ? 's' : ''}`, deletedCount, deletedClaims: deletedClaims || [] });
+    return res.json({ success: true, message: `Successfully deleted ${deletedCount} claim${deletedCount === 1 ? '' : 's'}`, deletedCount, deletedClaims: deletedClaims || [] });
   } catch (error) {
     if (error.status === 401) {
       console.error('❌ Authentication error:', error.message);
