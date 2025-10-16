@@ -1,6 +1,6 @@
 // Database connection for Railway deployment
-import dotenv from 'dotenv';
-import { createClient } from '@supabase/supabase-js';
+const dotenv = require('dotenv');
+const { createClient } = require('@supabase/supabase-js');
 
 dotenv.config();
 
@@ -157,11 +157,11 @@ async function gracefulShutdownHandler() {
   console.log('✅ Database connections closed');
 }
 
-// ES module exports
-export {
+// CommonJS exports
+module.exports = {
   getSupabaseClient,
   getSupabaseAdminClient,
   testDatabaseConnection,
   initializeDatabase,
   gracefulShutdownHandler
-};b
+};
