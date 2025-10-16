@@ -1,20 +1,14 @@
-const express = require('express');
-const cors = require('cors');
-const path = require('node:path');
-const { initializeDatabase } = require('./database.js');
+import express from 'express';
+import cors from 'cors';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { initializeDatabase } from './database.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// Initialize database
-(async () => {
-  try {
-    await initializeDatabase();
-    console.log('✅ Database initialized successfully');
-  } catch (error) {
-    console.error('❌ Database initialization failed:', error);
-  }
-})();
 
 // Middleware
 app.use(cors({
@@ -25,13 +19,14 @@ app.use(cors({
 }));
 
 // UPLOAD ROUTE - MOUNTED FIRST TO BYPASS ALL MIDDLEWARE
+const uploadRoute = await import('./api/admin/upload.js');
 app.use('/api/admin/upload', (req, res, next) => {
   console.log('🔥🔥🔥 UPLOAD ROUTE HIT FIRST - BYPASSING ALL MIDDLEWARE 🔥🔥🔥');
   console.log('📋 Method:', req.method);
   console.log('📋 URL:', req.url);
   console.log('📋 Content-Type:', req.headers['content-type']);
   next();
-}, require('./api/admin/upload.js'));
+}, uploadRoute.default);
 
 // Middleware - EXCLUDE upload routes from JSON parsing
 app.use((req, res, next) => {
@@ -74,10 +69,10 @@ app.get('/health', (req, res) => {
 });
 
 // Helper function to load a single route
-const loadRoute = (route, loadedRoutes, routeType = '') => {
+const loadRoute = async (route, loadedRoutes, routeType = '') => {
   try {
-    const router = require(route.file);
-    app.use(route.path, router);
+    const router = await import(route.file);
+    app.use(route.path, router.default);
     loadedRoutes.count++;
     console.log(`✅ Loaded ${routeType}route: ${route.path}`);
     return true;
@@ -88,9 +83,9 @@ const loadRoute = (route, loadedRoutes, routeType = '') => {
 };
 
 // Helper function to load routes array
-const loadRoutesArray = (routes, loadedRoutes, routeType = '') => {
+const loadRoutesArray = async (routes, loadedRoutes, routeType = '') => {
   for (const route of routes) {
-    loadRoute(route, loadedRoutes, routeType);
+    await loadRoute(route, loadedRoutes, routeType);
   }
 };
 
@@ -193,16 +188,16 @@ const getRouteDefinitions = () => {
 };
 
 // Mount ALL API routes with error handling
-const mountRoutes = () => {
+const mountRoutes = async () => {
   try {
     const loadedRoutes = { count: 0 };
     const { workingRoutes, originalRoutes } = getRouteDefinitions();
     
     // Load working routes first
-    loadRoutesArray(workingRoutes, loadedRoutes, 'working ');
+    await loadRoutesArray(workingRoutes, loadedRoutes, 'working ');
     
     // Load original routes
-    loadRoutesArray(originalRoutes, loadedRoutes, 'original ');
+    await loadRoutesArray(originalRoutes, loadedRoutes, 'original ');
 
     console.log(`✅ Successfully loaded ${loadedRoutes.count} API routes`);
   } catch (error) {
@@ -211,7 +206,7 @@ const mountRoutes = () => {
 };
 
 // Mount all routes
-mountRoutes();
+await mountRoutes();
 
 // Serve static files from the React build
 const frontendPath = path.join(__dirname, '..', '..', 'dist');
@@ -259,8 +254,16 @@ app.use('/api/*', (req, res) => {
   });
 });
 
+// Initialize database and start server
+try {
+  await initializeDatabase();
+  console.log('✅ Database initialized successfully');
+} catch (error) {
+  console.error('❌ Database initialization failed:', error);
+}
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 WhatNext Backend running on port ${PORT} with ALL APIs`);
 });
 
-module.exports = app;
+export default app;
