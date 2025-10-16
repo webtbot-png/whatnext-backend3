@@ -1,7 +1,7 @@
 const express = require('express');
 const { formidable  } = require('formidable');
-const fs = require('fs');
-const path = require('path');
+const fs = require('node:fs');
+const path = require('node:path');
 const jwt = require('jsonwebtoken');
 
 // Use global fetch if available (Node 18+) or require node-fetch v2
@@ -164,8 +164,8 @@ async function uploadBunnyFile(videoId, fileObj) {
     try {
       fs.unlinkSync(fileObj.filepath);
       console.log('✅ Temp file deleted:', fileObj.filepath);
-    } catch (unlinkErr) {
-      console.error('❌ Failed to delete temp file:', unlinkErr);
+    } catch (error_) {
+      console.error('❌ Failed to delete temp file:', error_);
     }
     if (!uploadRes.ok) {
       console.error('❌ Bunny upload failed:', uploadRes.status, uploadResText);
@@ -178,8 +178,8 @@ async function uploadBunnyFile(videoId, fileObj) {
       try {
         fs.unlinkSync(fileObj.filepath);
         console.log('✅ Temp file deleted after error:', fileObj.filepath);
-      } catch (unlinkErr) {
-        console.error('❌ Failed to delete temp file after error:', unlinkErr);
+      } catch (error_) {
+        console.error('❌ Failed to delete temp file after error:', error_);
       }
     }
     console.error('❌ uploadBunnyFile error:', error);
@@ -401,7 +401,7 @@ router.get('/test', (req, res) => {
         return '❌ FORMIDABLE_ERROR: ' + e.message;
       }
     })(),
-    fetchTest: typeof fetch !== 'undefined' ? '✅ FETCH_AVAILABLE' : '❌ FETCH_MISSING'
+    fetchTest: fetch === undefined ? '❌ FETCH_MISSING' : '✅ FETCH_AVAILABLE'
   };
   
   console.log('🧪 Test results:', JSON.stringify(testResults, null, 2));
@@ -536,7 +536,7 @@ async function handleUpload(req, res) {
     url: req.url,
     contentType: req.headers['content-type'],
     contentLength: req.headers['content-length'],
-    expectedSize: req.headers['content-length'] ? `${(parseInt(req.headers['content-length']) / (1024 * 1024)).toFixed(2)} MB` : 'unknown',
+    expectedSize: req.headers['content-length'] ? `${(Number.parseInt(req.headers['content-length']) / (1024 * 1024)).toFixed(2)} MB` : 'unknown',
     userAgent: req.headers['user-agent'],
     timestamp: new Date().toISOString()
   });
@@ -624,7 +624,7 @@ async function handleUpload(req, res) {
         }
         
         console.log(`✅ File accepted: ${originalFilename} (${mimetype})`);
-        console.log(`📊 Expected file size from headers: ${req.headers['content-length'] ? (parseInt(req.headers['content-length']) / (1024 * 1024)).toFixed(2) + ' MB' : 'unknown'}`);
+        console.log(`📊 Expected file size from headers: ${req.headers['content-length'] ? (Number.parseInt(req.headers['content-length']) / (1024 * 1024)).toFixed(2) + ' MB' : 'unknown'}`);
         console.log(`🔍 Large file upload detected - using extended timeouts`);
         return true;
       }
@@ -691,7 +691,7 @@ async function handleUpload(req, res) {
     
     // Check if file was truncated during upload
     if (fileObj && fileObj.size && req.headers['content-length']) {
-      const expectedSize = parseInt(req.headers['content-length']);
+      const expectedSize = Number.parseInt(req.headers['content-length']);
       const actualSize = fileObj.size;
       const sizeDifference = expectedSize - actualSize;
       
