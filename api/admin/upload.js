@@ -1,11 +1,11 @@
-import express from 'express';
-import { formidable } from 'formidable';
-import fs from 'node:fs';
-import path from 'node:path';
-import jwt from 'jsonwebtoken';
+const express = require('express');
+const { formidable } = require('formidable');
+const fs = require('node:fs');
+const path = require('node:path');
+const jwt = require('jsonwebtoken');
 
 // Use global fetch if available (Node 18+) or require node-fetch v2
-const fetch = globalThis.fetch || (await import('node-fetch')).default;
+const fetch = globalThis.fetch || require('node-fetch');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
@@ -239,7 +239,7 @@ async function updateSupabase(contentEntryId, updateUrl) {
   try {
     // Import database module
     console.log('📦 Importing database module...');
-    const { getSupabaseAdminClient } = await import('../../database.js');
+    const { getSupabaseAdminClient } = require('../../database.js');
     console.log('✅ Database module imported successfully');
     
     const supabase = getSupabaseAdminClient();
@@ -793,4 +793,4 @@ async function handleUpload(req, res) {
   });
 }
 
-export default router;
+module.exports = router;
