@@ -6,7 +6,7 @@ const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch
 const { getCurrentSolPrice } = require('../utils/sol-price.js');
 
 // Safe import of Solana payment service with fallback
-let solanaPaymentService = null;
+let solanaPaymentService = null; 
 try {
   const path = require('node:path');
   const solanaPath = path.join(__dirname, '../../lib/solana-payment.cjs');
