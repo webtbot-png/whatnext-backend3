@@ -128,7 +128,7 @@ async function fetchFromCoinCap() {
   }
 
   const data = await response.json();
-  return parseFloat(data.data?.priceUsd);
+  return Number.parseFloat(data.data?.priceUsd);
 }
 
 /**
@@ -146,7 +146,7 @@ async function fetchFromCrypto() {
   }
 
   const data = await response.json();
-  return parseFloat(data.result?.data?.[0]?.a);
+  return Number.parseFloat(data.result?.data?.[0]?.a);
 }
 
 /**
@@ -191,7 +191,7 @@ async function fetchFromBinance() {
   }
 
   const data = await response.json();
-  return parseFloat(data.price);
+  return Number.parseFloat(data.price);
 }
 
 /**
@@ -210,7 +210,7 @@ async function fetchFromKraken() {
 
   const data = await response.json();
   const result = data.result?.SOLUSD;
-  return parseFloat(result?.c?.[0]); // Current price
+  return Number.parseFloat(result?.c?.[0]); // Current price
 }
 
 /**
@@ -228,7 +228,7 @@ async function fetchFromCoinbase() {
   }
 
   const data = await response.json();
-  return parseFloat(data.data?.rates?.USD);
+  return Number.parseFloat(data.data?.rates?.USD);
 }
 
 /**
@@ -250,7 +250,7 @@ async function fetchFromDexScreener() {
   if (pairs && pairs.length > 0) {
     // Get the pair with highest liquidity
     const bestPair = pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
-    return parseFloat(bestPair.priceUsd);
+    return Number.parseFloat(bestPair.priceUsd);
   }
   throw new Error('No valid pairs found in DexScreener data');
 }
