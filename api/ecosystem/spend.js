@@ -133,13 +133,13 @@ router.get('/', async (req, res) => {
     // Calculate totals with dynamic USD conversion
     const totalExpensesSol = (spendEntries || [])
       .filter(entry => entry.category !== 'giveaway')
-      .reduce((sum, entry) => sum + parseFloat(entry.amount_sol?.toString() || '0'), 0);
+      .reduce((sum, entry) => sum + Number.parseFloat(entry.amount_sol?.toString() || '0'), 0);
     const totalExpensesUsd = totalExpensesSol * currentSolPrice; // Dynamic USD conversion
     const totalGiveawaysSol = (spendEntries || [])
       .filter(entry => entry.category === 'giveaway')
-      .reduce((sum, entry) => sum + parseFloat(entry.amount_sol?.toString() || '0'), 0);
+      .reduce((sum, entry) => sum + Number.parseFloat(entry.amount_sol?.toString() || '0'), 0);
     const totalSolPayouts = (payoutEntries || [])
-      .reduce((sum, entry) => sum + parseFloat(entry.amount_sol.toString()), 0);
+      .reduce((sum, entry) => sum + Number.parseFloat(entry.amount_sol.toString()), 0);
     const totalUsdPayouts = totalSolPayouts * currentSolPrice; // Dynamic USD conversion
     // QR Claims totals with dynamic USD conversion
     const totalQrClaimsSol = (claimedEntries || [])
