@@ -17,12 +17,12 @@ function verifyAdminToken(req) {
   jwt.verify(token, JWT_SECRET);
 }
 
-// POST /api/admin/upload-tracking/start - Start tracking an upload session
+// POST /api/admin/upload-tracking/start - Start tracking an upload session (single or batch)
 router.post('/start', async (req, res) => {
   try {
     verifyAdminToken(req);
     
-    const { contentEntryId, filename, fileSize } = req.body;
+    const { contentEntryId, filename, fileSize, batchId, folderTitle, folderDescription } = req.body;
     
     if (!contentEntryId || !filename) {
       return res.status(400).json({ 
@@ -47,6 +47,10 @@ router.post('/start', async (req, res) => {
       bunnyUploadUrl: null,
       finalUrl: null,
       error: null,
+      // Folder/batch support
+      batchId: batchId || null,
+      folderTitle: folderTitle || null,
+      folderDescription: folderDescription || null,
       steps: {
         credentials: false,
         bunnyUpload: false,
@@ -56,11 +60,13 @@ router.post('/start', async (req, res) => {
     
     uploadSessions.set(sessionId, session);
     
-    console.log(`🚀 Upload session started: ${sessionId} for content ${contentEntryId}`);
+    const batchInfo = batchId ? ` (batch: ${batchId})` : '';
+    console.log(`🚀 Upload session started: ${sessionId} for content ${contentEntryId}${batchInfo}`);
     
     return res.json({
       success: true,
       sessionId,
+      batchId,
       message: 'Upload session created'
     });
     
@@ -225,6 +231,153 @@ router.get('/active', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to get active sessions'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/start-batch - Start a batch upload session
+router.post('/start-batch', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { folderTitle, folderDescription, files } = req.body;
+    
+    if (!folderTitle || !files || !Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: folderTitle, files (array)' 
+      });
+    }
+
+    const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+    const sessionIds = [];
+    const supabase = getSupabaseAdminClient();
+    
+    console.log(`📁 Starting batch upload: ${batchId} - "${folderTitle}" (${files.length} files)`);
+    
+    // Create content entries for all files
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const partNumber = i + 1;
+      
+      // Create content entry with folder-based naming
+      const contentEntry = {
+        title: `${folderTitle} - Part ${partNumber}`,
+        description: folderDescription || `Part ${partNumber} of ${folderTitle}`,
+        content_type: 'video',
+        media_type: 'upload',
+        media_url: '[UPLOADING]',
+        status: 'uploading',
+        visibility: 'public',
+        folder_title: folderTitle,
+        folder_description: folderDescription,
+        part_number: partNumber,
+        batch_id: batchId,
+        tags: [folderTitle, `Part ${partNumber}`]
+      };
+      
+      const { data: newEntry, error } = await supabase
+        .from('content_entries')
+        .insert(contentEntry)
+        .select()
+        .single();
+        
+      if (error || !newEntry) {
+        console.error(`❌ Failed to create content entry for ${file.filename}:`, error);
+        continue;
+      }
+      
+      // Create upload session for this file
+      const sessionId = `upload_${Date.now()}_${i}_${Math.random().toString(36).substring(2)}`;
+      
+      const session = {
+        id: sessionId,
+        contentEntryId: newEntry.id,
+        filename: file.filename,
+        fileSize: file.fileSize || 0,
+        status: 'starting',
+        progress: 0,
+        startTime: new Date().toISOString(),
+        lastUpdate: new Date().toISOString(),
+        bunnyVideoId: null,
+        bunnyUploadUrl: null,
+        finalUrl: null,
+        error: null,
+        batchId,
+        folderTitle,
+        folderDescription,
+        partNumber,
+        steps: {
+          credentials: false,
+          bunnyUpload: false,
+          databaseUpdate: false
+        }
+      };
+      
+      uploadSessions.set(sessionId, session);
+      sessionIds.push(sessionId);
+      
+      console.log(`🚀 Batch session ${i + 1}/${files.length}: ${sessionId} for ${file.filename}`);
+    }
+    
+    return res.json({
+      success: true,
+      batchId,
+      sessionIds,
+      folderTitle,
+      totalFiles: files.length,
+      message: `Batch upload started: ${files.length} files`
+    });
+    
+  } catch (error) {
+    console.error('❌ Error starting batch upload:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to start batch upload'
+    });
+  }
+});
+
+// GET /api/admin/upload-tracking/batch/:batchId - Get batch upload status
+router.get('/batch/:batchId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { batchId } = req.params;
+    
+    const batchSessions = Array.from(uploadSessions.values())
+      .filter(session => session.batchId === batchId)
+      .sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+    
+    if (batchSessions.length === 0) {
+      return res.status(404).json({ success: false, error: 'Batch not found' });
+    }
+    
+    const totalProgress = batchSessions.reduce((sum, session) => sum + session.progress, 0) / batchSessions.length;
+    const completedCount = batchSessions.filter(session => session.status === 'completed').length;
+    const failedCount = batchSessions.filter(session => session.status === 'failed').length;
+    const activeCount = batchSessions.filter(session => 
+      session.status !== 'completed' && session.status !== 'failed'
+    ).length;
+    
+    return res.json({
+      success: true,
+      batchId,
+      folderTitle: batchSessions[0]?.folderTitle,
+      folderDescription: batchSessions[0]?.folderDescription,
+      totalFiles: batchSessions.length,
+      completedCount,
+      failedCount,
+      activeCount,
+      totalProgress: Math.round(totalProgress),
+      sessions: batchSessions
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting batch status:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get batch status'
     });
   }
 });
