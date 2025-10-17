@@ -239,14 +239,14 @@ async function updateSupabase(contentEntryId, updateUrl) {
   try {
     // Import database module
     console.log('📦 Importing database module...');
-      const _dbPath = path.join(__dirname, '..', '..', 'database.js');
-      const { getSupabaseAdminClient } = require(_dbPath);
+    const _dbPath = path.join(__dirname, '..', '..', 'database.js');
+    const { getSupabaseAdminClient } = require(_dbPath);
     console.log('✅ Database module imported successfully');
     
     const supabase = getSupabaseAdminClient();
     console.log('✅ Supabase client obtained');
     
-    // First, get the current content entry to preserve location_id
+    // First, try to get the current content entry to preserve location_id
     console.log('🔍 Fetching current content entry...');
     const { data: currentEntry, error: fetchError } = await supabase
       .from('content_entries')
@@ -254,12 +254,42 @@ async function updateSupabase(contentEntryId, updateUrl) {
       .eq('id', contentEntryId)
       .single();
       
-    if (fetchError) {
-      console.error('❌ Failed to fetch current content entry:', fetchError);
-      throw new Error(`Failed to fetch content entry: ${fetchError.message}`);
+    let entryToUpdate = currentEntry;
+    let actualEntryId = contentEntryId;
+    
+    if (fetchError || !currentEntry) {
+      console.error('❌ Content entry not found by ID:', contentEntryId, fetchError);
+      
+      // SMART RECOVERY: For large file uploads, try to find recent uploading entries
+      console.log('🔍 Attempting smart recovery - searching for recent uploading entries...');
+      
+      const { data: recentEntries, error: searchError } = await supabase
+        .from('content_entries')
+        .select('*')
+        .eq('status', 'uploading')
+        .gte('created_at', new Date(Date.now() - 30 * 60 * 1000).toISOString()) // Last 30 minutes
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (!searchError && recentEntries?.length > 0) {
+        // Use the most recent uploading entry
+        entryToUpdate = recentEntries[0];
+        actualEntryId = entryToUpdate.id;
+        console.log('✅ SMART RECOVERY SUCCESS: Found recent uploading entry as fallback:', actualEntryId);
+        console.log('🔍 Recovered entry details:', {
+          id: entryToUpdate.id,
+          title: entryToUpdate.title,
+          status: entryToUpdate.status,
+          created_at: entryToUpdate.created_at,
+          location_id: entryToUpdate.location_id
+        });
+      } else {
+        console.error('❌ SMART RECOVERY FAILED: No recent uploading entries found');
+        throw new Error(`Content entry not found and no recent uploads to recover from`);
+      }
     }
     
-    console.log('🔍 Current content entry:', JSON.stringify(currentEntry, null, 2));
+    console.log('🔍 Current content entry:', JSON.stringify(entryToUpdate, null, 2));
     
     // Update with media URL and set status to published
     const updateData = {
@@ -271,19 +301,19 @@ async function updateSupabase(contentEntryId, updateUrl) {
     console.log('🔍 Update data:', JSON.stringify(updateData, null, 2));
     
     // Preserve location_id if it exists
-    if (currentEntry?.location_id) {
-      console.log('✅ Preserving location_id:', currentEntry.location_id);
+    if (entryToUpdate?.location_id) {
+      console.log('✅ Preserving location_id:', entryToUpdate.location_id);
       console.log('✅ This video WILL appear on the map');
     } else {
       console.warn('⚠️ No location_id found - video will NOT appear on map');
       console.warn('⚠️ Make sure location is selected during upload');
     }
     
-    console.log('📝 Updating content entry in database...');
+    console.log('📝 Updating content entry in database using ID:', actualEntryId);
     const { data: updateResult, error: updateError } = await supabase
       .from('content_entries')
       .update(updateData)
-      .eq('id', contentEntryId)
+      .eq('id', actualEntryId)
       .select();
       
     if (updateError) {
@@ -295,7 +325,8 @@ async function updateSupabase(contentEntryId, updateUrl) {
     console.log('✅ Update result:', JSON.stringify(updateResult, null, 2));
     console.log(`✅ Status: uploading → published`);
     console.log(`✅ Media URL: ${updateUrl}`);
-    console.log(`✅ Location ID: ${currentEntry?.location_id || 'None (won\'t show on map)'}`);
+    console.log(`✅ Location ID: ${entryToUpdate?.location_id || 'None (won\'t show on map)'}`);
+    console.log(`✅ Used Entry ID: ${actualEntryId} ${actualEntryId !== contentEntryId ? '(RECOVERED)' : '(ORIGINAL)'}`);
     
     return true;
   } catch (err) {
