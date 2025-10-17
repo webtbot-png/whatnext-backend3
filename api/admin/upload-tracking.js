@@ -11,6 +11,7 @@ const uploadSessions = new Map();
 console.log('🔥 UPLOAD-TRACKING ROUTER LOADED - BATCH ENDPOINT AVAILABLE');
 console.log('📋 Available endpoints: start, update, status, complete, active, start-batch, batch/:id');
 
+// Helper function to verify admin token
 function verifyAdminToken(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -30,6 +31,203 @@ function verifyAdminToken(req) {
     console.error('❌ JWT verification failed:', error.message);
     throw new Error(`JWT verification failed: ${error.message}`);
   }
+}
+
+// Helper function to validate batch upload request
+function validateBatchRequest(req) {
+  const { folderTitle, files } = req.body;
+  
+  if (!folderTitle || !files || !Array.isArray(files) || files.length === 0) {
+    throw new Error('Missing required fields: folderTitle, files (array)');
+  }
+  
+  return { folderTitle, files };
+}
+
+// Helper function to create content entry object
+function createContentEntryObject(file, folderTitle, folderDescription, contentMetadata, batchId, partNumber) {
+  return {
+    // Basic info
+    title: `${folderTitle} - Part ${partNumber}`,
+    description: folderDescription || `Part ${partNumber} of ${folderTitle}`,
+    
+    // Metadata from batch form (same as manual entry)
+    content_type: contentMetadata?.content_type || 'video',
+    media_type: 'upload', // Only 'upload' is allowed by the database constraint
+    media_url: '[PENDING]',
+    
+    // Location - Handle country codes vs UUIDs
+    location_id: (contentMetadata?.location_id && contentMetadata.location_id.startsWith('country-')) ? null : contentMetadata?.location_id || null,
+    custom_location: contentMetadata?.custom_location || (contentMetadata?.location_id && contentMetadata.location_id.startsWith('country-') ? contentMetadata.location_id : null),
+    
+    // Scheduling
+    event_date: contentMetadata?.event_date || null,
+    event_time: contentMetadata?.event_time || null,
+    
+    // Visibility and status
+    status: contentMetadata?.status || 'published',
+    visibility: contentMetadata?.visibility || 'public',
+    
+    // Tags and category - Convert to PostgreSQL array format
+    tags: contentMetadata?.tags ? 
+      '{' + contentMetadata.tags.split(',').map(tag => '"' + tag.trim() + '"').join(',') + '}' : 
+      '{"' + folderTitle + '","Part ' + partNumber + '"}',
+    category: contentMetadata?.category || null,
+    
+    // Features
+    is_featured: contentMetadata?.is_featured || false,
+    is_pinned: contentMetadata?.is_pinned || false,
+    
+    // Technical
+    timezone: contentMetadata?.timezone || 'UTC',
+    metadata: contentMetadata?.metadata || JSON.stringify({
+      batch_upload: true,
+      folder_title: folderTitle,
+      part_number: partNumber
+    }),
+    
+    // Batch tracking
+    folder_title: folderTitle,
+    folder_description: folderDescription,
+    part_number: partNumber,
+    batch_id: batchId
+  };
+}
+
+// Helper function to create database entry with error handling
+async function createDatabaseEntry(supabase, contentEntry, filename) {
+  console.log(`💾 Inserting content entry for ${filename}:`, contentEntry);
+  
+  const { data: newEntry, error } = await supabase
+    .from('content_entries')
+    .insert(contentEntry)
+    .select()
+    .single();
+    
+  let finalEntry = newEntry;
+    
+  if (error || !finalEntry) {
+    console.error(`❌ Failed to create content entry for ${filename}:`, error);
+    
+    // If it's a media_type constraint error, try 'upload' (the only allowed value)
+    if (error?.message?.includes('content_entries_media_type_check')) {
+      console.log('🔧 Trying with media_type: upload (the only allowed value)...');
+      
+      const altContentEntry = { ...contentEntry, media_type: 'upload' };
+      
+      const { data: altEntry, error: altError } = await supabase
+        .from('content_entries')
+        .insert(altContentEntry)
+        .select()
+        .single();
+        
+      if (!altError && altEntry) {
+        console.log(`✅ Success with media_type: upload`);
+        finalEntry = altEntry;
+      } else {
+        console.log(`❌ Still failed with media_type: upload`, altError?.message);
+        throw new Error(`Failed to create database entry: ${altError?.message}`);
+      }
+    } else {
+      throw new Error(`Database error: ${error?.message}`);
+    }
+  }
+  
+  return finalEntry;
+}
+
+// Helper function to create upload session
+function createUploadSession(sessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber) {
+  return {
+    id: sessionId,
+    contentEntryId: finalEntry.id,
+    filename: file.filename,
+    fileSize: file.fileSize || 0,
+    status: 'pending',
+    progress: 0,
+    startTime: new Date().toISOString(),
+    lastUpdate: new Date().toISOString(),
+    bunnyVideoId: null,
+    bunnyUploadUrl: null,
+    finalUrl: null,
+    error: null,
+    batchId,
+    folderTitle,
+    folderDescription,
+    partNumber,
+    steps: {
+      credentials: false,
+      bunnyUpload: false,
+      databaseUpdate: false
+    }
+  };
+}
+
+// Helper function to process single file in batch
+async function processBatchFile(supabase, file, index, batchConfig) {
+  const { folderTitle, folderDescription, contentMetadata, batchId, sessionIds } = batchConfig;
+  const partNumber = index + 1;
+  
+  console.log(`🔄 Processing file ${partNumber}: ${file.filename}`);
+  
+  // Create content entry
+  const contentEntry = createContentEntryObject(file, folderTitle, folderDescription, contentMetadata, batchId, partNumber);
+  
+  // Create database entry with error handling
+  const finalEntry = await createDatabaseEntry(supabase, contentEntry, file.filename);
+  
+  console.log(`✅ Created content entry ${partNumber} with ID: ${finalEntry.id}`);
+  
+  // Create upload session
+  const sessionId = `upload_${Date.now()}_${index}_${Math.random().toString(36).substring(2)}`;
+  const session = createUploadSession(sessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber);
+  
+  // Store session in memory
+  uploadSessions.set(sessionId, session);
+  sessionIds.push(sessionId);
+  
+  console.log(`🚀 Batch session ${partNumber}: ${sessionId} for ${file.filename} (Content Entry ID: ${finalEntry.id})`);
+  
+  // Add small delay to ensure unique timestamps
+  await new Promise(resolve => setTimeout(resolve, 10));
+}
+
+// Main batch processing function
+async function processBatchFiles(supabase, files, batchConfig) {
+  const { folderTitle, sessionIds } = batchConfig;
+  
+  console.log(`📁 Starting batch upload: ${batchConfig.batchId} - "${folderTitle}" (${files.length} files)`);
+  
+  for (let i = 0; i < files.length; i++) {
+    await processBatchFile(supabase, files[i], i, batchConfig);
+  }
+  
+  console.log(`✅ Batch upload complete: ${sessionIds.length} sessions created`);
+  console.log(`🗂️ Total sessions in memory: ${uploadSessions.size}`);
+}
+
+// Helper function to create response object
+function createBatchResponse(batchId, sessionIds, folderTitle, files) {
+  const createdSessions = sessionIds.map(id => uploadSessions.get(id)).filter(Boolean);
+  
+  return {
+    success: true,
+    batchId,
+    sessionIds,
+    folderTitle,
+    totalFiles: files.length,
+    createdSessions,
+    message: `Batch upload started: ${files.length} files`,
+    debug: {
+      totalSessionsInMemory: uploadSessions.size,
+      sessionDetails: createdSessions.map(s => ({
+        id: s.id,
+        filename: s.filename,
+        status: s.status,
+        contentEntryId: s.contentEntryId
+      }))
+    }
+  };
 }
 
 // POST /api/admin/upload-tracking/start - Start tracking an upload session (single or batch)
@@ -280,27 +478,21 @@ router.get('/active', async (req, res) => {
 router.post('/start-batch', async (req, res) => {
   console.log('🔥 BATCH UPLOAD ENDPOINT HIT!');
   console.log('📋 Request body:', JSON.stringify(req.body, null, 2));
-  console.log('📋 Headers:', JSON.stringify(req.headers, null, 2));
   
   try {
     console.log('🔑 Verifying admin token...');
     verifyAdminToken(req);
     console.log('✅ Token verified successfully');
     
-    const { folderTitle, folderDescription, files, contentMetadata } = req.body;
+    // Validate request
+    const { folderTitle, files } = validateBatchRequest(req);
+    const { folderDescription, contentMetadata } = req.body;
     
     console.log('📁 Folder Title:', folderTitle);
     console.log('📄 Files count:', files?.length);
     console.log('📋 Content Metadata:', contentMetadata);
     
-    if (!folderTitle || !files || !Array.isArray(files) || files.length === 0) {
-      console.log('❌ Missing required fields');
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Missing required fields: folderTitle, files (array)' 
-      });
-    }
-
+    // Generate batch ID and initialize session tracking
     const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2)}`;
     const sessionIds = [];
     
@@ -311,145 +503,23 @@ router.post('/start-batch', async (req, res) => {
       const supabase = getSupabaseAdminClient();
       console.log('✅ Supabase client obtained');
       
-      console.log(`📁 Starting batch upload: ${batchId} - "${folderTitle}" (${files.length} files)`);
-      console.log(`📋 Content metadata:`, contentMetadata);
-      
-      // Create content entries for all files with FULL metadata
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const partNumber = i + 1;
-        
-        console.log(`🔄 Processing file ${i + 1}/${files.length}: ${file.filename}`);
-        
-        // Create content entry with ALL metadata from batch form
-        const contentEntry = {
-          // Basic info
-          title: `${folderTitle} - Part ${partNumber}`,
-          description: folderDescription || `Part ${partNumber} of ${folderTitle}`,
-          
-          // Metadata from batch form (same as manual entry)
-          content_type: contentMetadata?.content_type || 'video',
-          media_type: contentMetadata?.media_type || 'video',
-          media_url: '[PENDING]',
-          
-          // Location - Handle country codes vs UUIDs
-          location_id: (contentMetadata?.location_id && contentMetadata.location_id.startsWith('country-')) ? null : contentMetadata?.location_id || null,
-          custom_location: contentMetadata?.custom_location || (contentMetadata?.location_id && contentMetadata.location_id.startsWith('country-') ? contentMetadata.location_id : null),
-          
-          // Scheduling
-          event_date: contentMetadata?.event_date || null,
-          event_time: contentMetadata?.event_time || null,
-          
-          // Visibility and status
-          status: contentMetadata?.status || 'published',
-          visibility: contentMetadata?.visibility || 'public',
-          
-          // Tags and category - Convert to PostgreSQL array format
-          tags: contentMetadata?.tags ? 
-            '{' + contentMetadata.tags.split(',').map(tag => '"' + tag.trim() + '"').join(',') + '}' : 
-            '{"' + folderTitle + '","Part ' + partNumber + '"}',
-          category: contentMetadata?.category || null,
-          
-          // Features
-          is_featured: contentMetadata?.is_featured || false,
-          is_pinned: contentMetadata?.is_pinned || false,
-          
-          // Technical
-          timezone: contentMetadata?.timezone || 'UTC',
-          metadata: contentMetadata?.metadata || JSON.stringify({
-            batch_upload: true,
-            folder_title: folderTitle,
-            part_number: partNumber
-          }),
-          
-          // Batch tracking
-          folder_title: folderTitle,
-          folder_description: folderDescription,
-          part_number: partNumber,
-          batch_id: batchId
-        };
-        
-        console.log(`💾 Inserting content entry ${i + 1}:`, contentEntry);
-        
-        const { data: newEntry, error } = await supabase
-          .from('content_entries')
-          .insert(contentEntry)
-          .select()
-          .single();
-          
-        if (error || !newEntry) {
-          console.error(`❌ Failed to create content entry for ${file.filename}:`, error);
-          console.log('🔄 Continuing to next file...');
-          continue;
-        }
-        
-        console.log(`✅ Created content entry ${i + 1} with ID: ${newEntry.id}`);
-        
-        // Create upload session for this file with unique timestamp
-        const sessionId = `upload_${Date.now()}_${i}_${Math.random().toString(36).substring(2)}`;
-        
-        const session = {
-          id: sessionId,
-          contentEntryId: newEntry.id,
-          filename: file.filename,
-          fileSize: file.fileSize || 0,
-          status: 'pending',
-          progress: 0,
-          startTime: new Date().toISOString(),
-          lastUpdate: new Date().toISOString(),
-          bunnyVideoId: null,
-          bunnyUploadUrl: null,
-          finalUrl: null,
-          error: null,
-          batchId,
-          folderTitle,
-          folderDescription,
-          partNumber,
-          steps: {
-            credentials: false,
-            bunnyUpload: false,
-            databaseUpdate: false
-          }
-        };
-        
-        // Store session in memory
-        uploadSessions.set(sessionId, session);
-        sessionIds.push(sessionId);
-        
-        console.log(`🚀 Batch session ${i + 1}/${files.length}: ${sessionId} for ${file.filename} (Content Entry ID: ${newEntry.id})`);
-        console.log(`📊 Total sessions in memory: ${uploadSessions.size}`);
-        
-        // Add small delay to ensure unique timestamps
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      
-      console.log(`✅ Batch upload complete: ${sessionIds.length} sessions created`);
-      console.log(`📋 Session IDs:`, sessionIds);
-      console.log(`🗂️ Total sessions in memory:`, uploadSessions.size);
-      
-      // Return detailed session information
-      const createdSessions = sessionIds.map(id => uploadSessions.get(id)).filter(Boolean);
-      
-      console.log(`📤 Sending response with ${createdSessions.length} created sessions`);
-      
-      return res.json({
-        success: true,
-        batchId,
-        sessionIds,
+      // Create batch configuration object
+      const batchConfig = {
         folderTitle,
-        totalFiles: files.length,
-        createdSessions,
-        message: `Batch upload started: ${files.length} files`,
-        debug: {
-          totalSessionsInMemory: uploadSessions.size,
-          sessionDetails: createdSessions.map(s => ({
-            id: s.id,
-            filename: s.filename,
-            status: s.status,
-            contentEntryId: s.contentEntryId
-          }))
-        }
-      });
+        folderDescription,
+        contentMetadata,
+        batchId,
+        sessionIds
+      };
+      
+      // Process all files in the batch
+      await processBatchFiles(supabase, files, batchConfig);
+      
+      // Create and send response
+      const response = createBatchResponse(batchId, sessionIds, folderTitle, files);
+      console.log(`� Sending response with ${response.createdSessions.length} created sessions`);
+      
+      return res.json(response);
       
     } catch (dbError) {
       console.error('💥 Database error during batch upload:', dbError);
