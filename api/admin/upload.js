@@ -24,7 +24,7 @@ const ALLOWED_MIME_TYPES = [
  * Explicitly checks file extensions to satisfy security linting
  */
 function isAllowedFileType(originalFilename, mimetype) {
-  if (!originalFilename || !mimetype) {
+  if (originalFilename === undefined || originalFilename === null || mimetype === undefined || mimetype === null) {
     return { allowed: false, reason: 'Missing filename or mimetype' };
   }
   
@@ -55,7 +55,7 @@ function verifyAdminToken(req) {
   console.log('🔐 Verifying admin token for upload...');
   console.log('Authorization header:', req.headers.authorization);
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  if (authHeader === undefined || authHeader === null || authHeader.startsWith('Bearer ') === false) {
     console.log('❌ No Bearer token provided');
     throw new Error('Unauthorized');
   }
@@ -77,7 +77,7 @@ console.log('🔥 BUNNY CONFIG CHECK:', {
   BUNNY_API_KEY: BUNNY_API_KEY ? '✅ SET' : '❌ MISSING'
 });
 
-if (!BUNNY_LIBRARY_ID || !BUNNY_API_KEY) {
+if (BUNNY_LIBRARY_ID === undefined || BUNNY_LIBRARY_ID === null || BUNNY_API_KEY === undefined || BUNNY_API_KEY === null) {
   console.error('❌ CRITICAL ERROR: Missing Bunny CDN environment variables!');
   console.error('❌ BUNNY_LIBRARY_ID:', BUNNY_LIBRARY_ID || 'UNDEFINED');
   console.error('❌ BUNNY_API_KEY:', BUNNY_API_KEY ? 'DEFINED' : 'UNDEFINED');
@@ -143,7 +143,7 @@ async function uploadBunnyFile(videoId, fileObj) {
     }
     const videoBuffer = fs.readFileSync(fileObj.filepath);
     console.log('📏 Video file size:', videoBuffer.length, 'bytes');
-    if (!videoBuffer || videoBuffer.length === 0) {
+    if (videoBuffer === null || videoBuffer === undefined || videoBuffer.length === 0) {
       console.error('❌ Video buffer is empty');
       throw new Error('Video buffer is empty');
     }
@@ -271,7 +271,7 @@ async function updateSupabase(contentEntryId, updateUrl) {
         .order('created_at', { ascending: false })
         .limit(5);
 
-      if (!searchError && recentEntries?.length > 0) {
+      if (searchError === null && recentEntries?.length > 0) {
         // Use the most recent uploading entry
         entryToUpdate = recentEntries[0];
         actualEntryId = entryToUpdate.id;
@@ -326,7 +326,7 @@ async function updateSupabase(contentEntryId, updateUrl) {
     console.log(`✅ Status: uploading → published`);
     console.log(`✅ Media URL: ${updateUrl}`);
     console.log(`✅ Location ID: ${entryToUpdate?.location_id || 'None (won\'t show on map)'}`);
-    console.log(`✅ Used Entry ID: ${actualEntryId} ${actualEntryId !== contentEntryId ? '(RECOVERED)' : '(ORIGINAL)'}`);
+    console.log(`✅ Used Entry ID: ${actualEntryId} ${actualEntryId === contentEntryId ? '(ORIGINAL)' : '(RECOVERED)'}`);
     
     return true;
   } catch (err) {
@@ -456,7 +456,7 @@ router.get('/test', (req, res) => {
         details: 'Valid authentication token required'
       });
     }  // Check Bunny CDN configuration
-  if (!BUNNY_LIBRARY_ID || !BUNNY_API_KEY) {
+  if (BUNNY_LIBRARY_ID === undefined || BUNNY_LIBRARY_ID === null || BUNNY_API_KEY === undefined || BUNNY_API_KEY === null) {
     console.error('❌ BUNNY CDN NOT CONFIGURED');
     return res.status(500).json({ 
       error: 'Server configuration error', 
@@ -467,7 +467,7 @@ router.get('/test', (req, res) => {
   try {
     const { filename, contentEntryId } = req.body;
     
-    if (!filename || !contentEntryId) {
+    if (filename === undefined || filename === null || contentEntryId === undefined || contentEntryId === null) {
       return res.status(400).json({
         error: 'Missing required fields',
         details: 'filename and contentEntryId are required'
@@ -581,7 +581,7 @@ async function handleUpload(req, res) {
   }
 
   // Check Bunny CDN configuration
-  if (!BUNNY_LIBRARY_ID || !BUNNY_API_KEY) {
+  if (BUNNY_LIBRARY_ID === undefined || BUNNY_LIBRARY_ID === null || BUNNY_API_KEY === undefined || BUNNY_API_KEY === null) {
     console.error('❌ BUNNY CDN NOT CONFIGURED - Missing environment variables!');
     console.error('❌ BUNNY_LIBRARY_ID:', BUNNY_LIBRARY_ID || 'UNDEFINED');
     console.error('❌ BUNNY_API_KEY:', BUNNY_API_KEY ? 'DEFINED' : 'UNDEFINED');
