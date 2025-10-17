@@ -126,7 +126,12 @@ function prepareContentEntry(data) {
     view_count: 0,
     like_count: 0,
     metadata: data.metadata || {},
-    processing_status: data.processing_status || 'ready'
+    processing_status: data.processing_status || 'ready',
+    // Folder/batch organization fields
+    folder_title: data.folder_title || null,
+    folder_description: data.folder_description || null,
+    batch_id: data.batch_id || null,
+    part_number: data.part_number || null
   };
 
   // Set published_at for published status
@@ -409,6 +414,164 @@ router.post('/repair', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to repair content entries',
+      details: error.message
+    });
+  }
+});
+
+// POST /api/admin/content/organize-folders - Organize existing content into folders by matching titles
+router.post('/organize-folders', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const supabase = getSupabaseAdminClient();
+    
+    console.log('📁 Starting content folder organization...');
+    
+    // Get all content that doesn't have folder organization yet
+    const { data: unorganizedContent, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('id, title, description')
+      .is('folder_title', null)
+      .order('title');
+    
+    if (fetchError) {
+      throw fetchError;
+    }
+    
+    // Group content by similar titles
+    const titleGroups = new Map();
+    
+    for (const content of unorganizedContent) {
+      // Extract base title (remove "Part X", "- Part X", etc.)
+      const baseTitle = content.title
+        .replace(/\s*-\s*Part\s+\d+/i, '')
+        .replace(/\s*Part\s+\d+/i, '')
+        .replace(/\s*\(\s*Part\s+\d+\s*\)/i, '')
+        .replace(/\s*\[\s*Part\s+\d+\s*\]/i, '')
+        .trim();
+      
+      if (!titleGroups.has(baseTitle)) {
+        titleGroups.set(baseTitle, []);
+      }
+      
+      titleGroups.get(baseTitle).push(content);
+    }
+    
+    let foldersCreated = 0;
+    let contentUpdated = 0;
+    
+    // Process groups with multiple items
+    for (const [baseTitle, items] of titleGroups.entries()) {
+      if (items.length > 1) {
+        console.log(`📂 Creating folder "${baseTitle}" with ${items.length} items`);
+        
+        const batchId = `folder_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+        
+        // Update all items in this group
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const partNumber = i + 1;
+          
+          const { error: updateError } = await supabase
+            .from('content_entries')
+            .update({
+              folder_title: baseTitle,
+              folder_description: `Collection: ${baseTitle}`,
+              batch_id: batchId,
+              part_number: partNumber,
+              title: `${baseTitle} - Part ${partNumber}`
+            })
+            .eq('id', item.id);
+          
+          if (!updateError) {
+            contentUpdated++;
+          }
+        }
+        
+        foldersCreated++;
+      }
+    }
+    
+    console.log(`✅ Folder organization complete: ${foldersCreated} folders, ${contentUpdated} items organized`);
+    
+    return res.json({
+      success: true,
+      foldersCreated,
+      contentUpdated,
+      message: `Organized ${contentUpdated} items into ${foldersCreated} folders`
+    });
+    
+  } catch (error) {
+    console.error('❌ Error organizing folders:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to organize folders',
+      details: error.message
+    });
+  }
+});
+
+// GET /api/admin/content/folders - Get all content organized by folders
+router.get('/folders', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Get all content with folder organization
+    const { data: folderContent, error } = await supabase
+      .from('content_entries')
+      .select('*')
+      .not('folder_title', 'is', null)
+      .order('folder_title')
+      .order('part_number');
+    
+    if (error) {
+      throw error;
+    }
+    
+    // Group by folder_title
+    const folders = new Map();
+    
+    for (const item of folderContent) {
+      const folderKey = item.folder_title;
+      
+      if (!folders.has(folderKey)) {
+        folders.set(folderKey, {
+          folderTitle: item.folder_title,
+          folderDescription: item.folder_description,
+          batchId: item.batch_id,
+          items: [],
+          totalItems: 0,
+          totalDuration: 0,
+          createdAt: item.created_at
+        });
+      }
+      
+      const folder = folders.get(folderKey);
+      folder.items.push(item);
+      folder.totalItems++;
+      
+      if (item.duration) {
+        folder.totalDuration += item.duration;
+      }
+    }
+    
+    const foldersArray = Array.from(folders.values());
+    
+    return res.json({
+      success: true,
+      folders: foldersArray,
+      totalFolders: foldersArray.length,
+      totalItems: folderContent.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting folders:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to get folders',
       details: error.message
     });
   }
