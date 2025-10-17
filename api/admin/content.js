@@ -217,12 +217,12 @@ router.post('/', async (req, res) => {
     }
     console.log('✅ Content entry created successfully:', contentEntry.id);
     return res.status(201).json({ success: true, entry: contentEntry });
-      } catch (error) {
-      return handleError(error, req, res);
-    }
-  });
+  } catch (error) {
+    return handleError(error, req, res);
+  }
+});
 
-  // PUT /api/admin/content/:id - Update existing content entry
+// PUT /api/admin/content/:id - Update existing content entry
   router.put('/:id', async (req, res) => {
     try {
       verifyAdminToken(req);
@@ -251,22 +251,35 @@ router.post('/', async (req, res) => {
         console.error('❌ Content entry not found by ID:', id, fetchError);
         
         // For large file uploads, the entry might have been created but ID lost due to timeout
-        // Try to find recent uploading entries as fallback
+        // Try to find recent entries without media_url as fallback
         if (req.body.media_url && req.body.status === 'published') {
-          console.log('🔍 Attempting to find recent uploading entry for large file...');
+          console.log('🔍 Attempting to find recent entry for large file...');
           
           const { data: recentEntries, error: searchError } = await supabase
             .from('content_entries')
             .select('*')
-            .eq('status', 'uploading')
-            .gte('created_at', new Date(Date.now() - 30 * 60 * 1000).toISOString()) // Last 30 minutes
+            .or('status.eq.uploading,status.eq.draft,status.eq.processing')
+            .is('media_url', null)
+            .gte('created_at', new Date(Date.now() - 60 * 60 * 1000).toISOString()) // Last 60 minutes
             .order('created_at', { ascending: false })
-            .limit(5);
+            .limit(10);
 
           if (!searchError && recentEntries?.length > 0) {
-            // Use the most recent uploading entry
-            const fallbackEntry = recentEntries[0];
-            console.log('✅ Found recent uploading entry as fallback:', fallbackEntry.id);
+            // Try to find the best match based on title or most recent
+            let fallbackEntry = recentEntries[0];
+            
+            // If we have title info, try to find a better match
+            if (req.body.title) {
+              const titleMatch = recentEntries.find(entry => 
+                entry.title && entry.title.toLowerCase().includes(req.body.title.toLowerCase())
+              );
+              if (titleMatch) {
+                fallbackEntry = titleMatch;
+                console.log('✅ Found title-matched entry:', fallbackEntry.title);
+              }
+            }
+            
+            console.log('✅ Found recent entry as fallback:', fallbackEntry.id, fallbackEntry.title);
             
             // Update using the fallback entry ID
             const { data: updatedFallbackEntry, error: fallbackUpdateError } = await supabase
@@ -278,12 +291,13 @@ router.post('/', async (req, res) => {
 
             if (!fallbackUpdateError) {
               console.log('✅ Successfully updated using fallback entry');
-              return res.json({
-                success: true,
+              return res.status(200).json({ 
+                success: true, 
                 entry: updatedFallbackEntry,
-                message: 'Content entry updated successfully (recovered from timeout)',
-                fallbackUsed: true
+                note: 'Updated using fallback entry matching' 
               });
+            } else {
+              console.error('❌ Fallback update failed:', fallbackUpdateError);
             }
           }
         }
@@ -320,8 +334,8 @@ router.post('/', async (req, res) => {
     }
   });
 
-  // DELETE /api/admin/content/:id
-  router.delete('/:id', async (req, res) => {
+// DELETE /api/admin/content/:id
+router.delete('/:id', async (req, res) => {
   try {
     verifyAdminToken(req);
     const { id } = req.params;
@@ -337,6 +351,46 @@ router.post('/', async (req, res) => {
     return res.json({ success: true, message: `Content entry ${id} deleted` });
   } catch (error) {
     return handleError(error, req, res);
+  }
+});
+
+// POST /api/admin/content/repair - Repair orphaned content entries
+router.post('/repair', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    console.log('🔧 Starting content repair process...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Find content entries without media_url that might be orphaned
+    const { data: orphanedEntries, error: searchError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .is('media_url', null)
+      .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()) // Last 24 hours
+      .order('created_at', { ascending: false });
+
+    if (searchError) {
+      throw searchError;
+    }
+
+    console.log(`🔍 Found ${orphanedEntries?.length || 0} potentially orphaned entries`);
+    
+    // Return the orphaned entries for manual review
+    return res.json({
+      success: true,
+      orphanedEntries: orphanedEntries || [],
+      count: orphanedEntries?.length || 0,
+      message: 'Found orphaned content entries. Use PUT /api/admin/content/:id to fix them.'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error during content repair:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to repair content entries',
+      details: error.message
+    });
   }
 });
 
