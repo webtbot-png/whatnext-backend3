@@ -403,11 +403,18 @@ router.get('/test', (req, res) => {
       try {
         // Test formidable configuration with file type restrictions
         // Secure file upload with extension validation
-        const form = formidable({
+        formidable({
           uploadDir: '/tmp',
           keepExtensions: true,
           maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB for testing
           filter: function ({name, originalFilename, mimetype}) {
+            // Validate file extensions for security
+            const allowedExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm'];
+            const fileExtension = originalFilename ? originalFilename.toLowerCase().match(/\.[^.]*$/)?.[0] : null;
+            
+            if (!fileExtension || !allowedExtensions.includes(fileExtension)) {
+              return false; // Reject file
+            }
             // Security: File extension restriction for safety
             if (!originalFilename) return false;
             const ext = path.extname(originalFilename).toLowerCase();
