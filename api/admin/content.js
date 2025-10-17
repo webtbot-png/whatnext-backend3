@@ -222,117 +222,137 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PUT /api/admin/content/:id - Update existing content entry
-  router.put('/:id', async (req, res) => {
-    try {
-      verifyAdminToken(req);
-      const { id } = req.params;
-      
-      if (!id) {
-        return res.status(400).json({
-          success: false, 
-          error: 'Missing content ID' 
-        });
-      }
+// Helper function to find fallback entry for large file uploads
+async function findFallbackEntry(supabase, requestBody) {
+  if (!requestBody.media_url || requestBody.status !== 'published') {
+    return null;
+  }
 
-      console.log('🔄 Updating content entry ID:', id);
-      console.log('📝 Update data:', req.body);
+  console.log('🔍 Attempting to find recent entry for large file...');
+  
+  const { data: recentEntries, error: searchError } = await supabase
+    .from('content_entries')
+    .select('*')
+    .or('status.eq.uploading,status.eq.draft,status.eq.processing')
+    .is('media_url', null)
+    .gte('created_at', new Date(Date.now() - 60 * 60 * 1000).toISOString()) // Last 60 minutes
+    .order('created_at', { ascending: false })
+    .limit(10);
 
-      const supabase = getSupabaseAdminClient();
-      
-      // First check if the content entry exists
-      const { data: existingEntry, error: fetchError } = await supabase
-        .from('content_entries')
-        .select('*')
-        .eq('id', id)
-        .single();
+  if (searchError || !recentEntries?.length) {
+    return null;
+  }
 
-      if (fetchError || !existingEntry) {
-        console.error('❌ Content entry not found by ID:', id, fetchError);
-        
-        // For large file uploads, the entry might have been created but ID lost due to timeout
-        // Try to find recent entries without media_url as fallback
-        if (req.body.media_url && req.body.status === 'published') {
-          console.log('🔍 Attempting to find recent entry for large file...');
-          
-          const { data: recentEntries, error: searchError } = await supabase
-            .from('content_entries')
-            .select('*')
-            .or('status.eq.uploading,status.eq.draft,status.eq.processing')
-            .is('media_url', null)
-            .gte('created_at', new Date(Date.now() - 60 * 60 * 1000).toISOString()) // Last 60 minutes
-            .order('created_at', { ascending: false })
-            .limit(10);
-
-          if (!searchError && recentEntries?.length > 0) {
-            // Try to find the best match based on title or most recent
-            let fallbackEntry = recentEntries[0];
-            
-            // If we have title info, try to find a better match
-            if (req.body.title) {
-              const titleMatch = recentEntries.find(entry => 
-                entry.title && entry.title.toLowerCase().includes(req.body.title.toLowerCase())
-              );
-              if (titleMatch) {
-                fallbackEntry = titleMatch;
-                console.log('✅ Found title-matched entry:', fallbackEntry.title);
-              }
-            }
-            
-            console.log('✅ Found recent entry as fallback:', fallbackEntry.id, fallbackEntry.title);
-            
-            // Update using the fallback entry ID
-            const { data: updatedFallbackEntry, error: fallbackUpdateError } = await supabase
-              .from('content_entries')
-              .update(req.body)
-              .eq('id', fallbackEntry.id)
-              .select()
-              .single();
-
-            if (!fallbackUpdateError) {
-              console.log('✅ Successfully updated using fallback entry');
-              return res.status(200).json({ 
-                success: true, 
-                entry: updatedFallbackEntry,
-                note: 'Updated using fallback entry matching' 
-              });
-            } else {
-              console.error('❌ Fallback update failed:', fallbackUpdateError);
-            }
-          }
-        }
-        
-        return res.status(404).json({
-          success: false,
-          error: 'Content entry not found',
-          details: fetchError?.message || 'Entry does not exist'
-        });
-      }
-
-      // Update the entry
-      const { data: updatedEntry, error: updateError } = await supabase
-        .from('content_entries')
-        .update(req.body)
-        .eq('id', id)
-        .select()
-        .single();
-
-      if (updateError) {
-        console.error('❌ Failed to update content entry:', updateError);
-        throw updateError;
-      }
-
-      console.log('✅ Content entry updated successfully:', id);
-      return res.json({
-        success: true,
-        entry: updatedEntry,
-        message: 'Content entry updated successfully'
-      });
-
-    } catch (error) {
-      return handleError(error, req, res);
+  // Try to find the best match based on title or most recent
+  let fallbackEntry = recentEntries[0];
+  
+  // If we have title info, try to find a better match
+  if (requestBody.title) {
+    const titleMatch = recentEntries.find(entry => 
+      entry.title && entry.title.toLowerCase().includes(requestBody.title.toLowerCase())
+    );
+    if (titleMatch) {
+      fallbackEntry = titleMatch;
+      console.log('✅ Found title-matched entry:', fallbackEntry.title);
     }
-  });
+  }
+  
+  console.log('✅ Found recent entry as fallback:', fallbackEntry.id, fallbackEntry.title);
+  return fallbackEntry;
+}
+
+// Helper function to attempt fallback update
+async function attemptFallbackUpdate(supabase, requestBody, fallbackEntry) {
+  const { data: updatedFallbackEntry, error: fallbackUpdateError } = await supabase
+    .from('content_entries')
+    .update(requestBody)
+    .eq('id', fallbackEntry.id)
+    .select()
+    .single();
+
+  if (fallbackUpdateError) {
+    console.error('❌ Fallback update failed:', fallbackUpdateError);
+    return null;
+  }
+
+  console.log('✅ Successfully updated using fallback entry');
+  return updatedFallbackEntry;
+}
+
+// PUT /api/admin/content/:id - Update existing content entry
+router.put('/:id', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { id } = req.params;
+    
+    if (!id) {
+      return res.status(400).json({
+        success: false, 
+        error: 'Missing content ID' 
+      });
+    }
+
+    console.log('🔄 Updating content entry ID:', id);
+    console.log('📝 Update data:', req.body);
+
+    const supabase = getSupabaseAdminClient();
+    
+    // First check if the content entry exists
+    const { data: existingEntry, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !existingEntry) {
+      console.error('❌ Content entry not found by ID:', id, fetchError);
+      
+      // For large file uploads, try to find recent entries as fallback
+      const fallbackEntry = await findFallbackEntry(supabase, req.body);
+      
+      if (fallbackEntry) {
+        const updatedEntry = await attemptFallbackUpdate(supabase, req.body, fallbackEntry);
+        
+        if (updatedEntry) {
+          return res.status(200).json({ 
+            success: true, 
+            entry: updatedEntry,
+            note: 'Updated using fallback entry matching' 
+          });
+        }
+      }
+      
+      return res.status(404).json({
+        success: false,
+        error: 'Content entry not found',
+        details: fetchError?.message || 'Entry does not exist'
+      });
+    }
+
+    // Update the entry
+    const { data: updatedEntry, error: updateError } = await supabase
+      .from('content_entries')
+      .update(req.body)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('❌ Failed to update content entry:', updateError);
+      throw updateError;
+    }
+
+    console.log('✅ Content entry updated successfully:', id);
+    return res.json({
+      success: true,
+      entry: updatedEntry,
+      message: 'Content entry updated successfully'
+    });
+
+  } catch (error) {
+    return handleError(error, req, res);
+  }
+});
 
 // DELETE /api/admin/content/:id
 router.delete('/:id', async (req, res) => {
