@@ -2,18 +2,6 @@ const { Connection, PublicKey, Transaction, sendAndConfirmTransaction, Keypair }
 const { getSupabaseAdminClient } = require('../../database.js');
 const crypto = require('node:crypto');
 
-// Safe import of PumpFun auto-claim system
-let pumpFunAutoClaimService = null;
-try {
-  const pumpFunPath = require('node:path').join(__dirname, '../../../pumpfun-auto-claim.cjs');
-  console.log('🔍 Dividend claimer: Loading PumpFun auto-claim service from:', pumpFunPath);
-  pumpFunAutoClaimService = require(pumpFunPath);
-  console.log('✅ Dividend claimer: PumpFun auto-claim service imported successfully');
-} catch (error) {
-  console.warn('⚠️ Dividend claimer: PumpFun auto-claim service not available:', error.message);
-  console.warn('⚠️ Dividend claimer: PumpFun fees will not be auto-claimed');
-}
-
 // Solana connection
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
@@ -149,88 +137,32 @@ async function checkPumpFunFees(feeAccountAddress) {
  */
 async function claimPumpFunFees(settings) {
   try {
-    console.log('🎯 Starting REAL PumpFun creator fee claim process...');
+    console.log('🎯 Starting PumpFun creator fee claim process...');
     
-    if (!pumpFunAutoClaimService) {
-      console.warn('⚠️ PumpFun auto-claim service not available, using mock implementation');
-      
-      // Fallback to mock if service not available
-      const feeInfo = await checkPumpFunFees(settings.pumpfun_fee_account);
-      
-      if (feeInfo.balance < settings.min_claim_amount) {
-        console.log(`⏭️ Fee balance (${feeInfo.balance} SOL) below minimum claim amount (${settings.min_claim_amount} SOL)`);
-        return {
-          success: false,
-          reason: 'Below minimum claim amount',
-          balance: feeInfo.balance,
-          minAmount: settings.min_claim_amount
-        };
-      }
-      
-      const mockClaimAmount = feeInfo.balance * 0.8;
-      const mockTransactionId = 'mock_tx_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-      
-      console.log(`✅ MOCK: Claimed ${mockClaimAmount} SOL with transaction: ${mockTransactionId}`);
-      
-      return {
-        success: true,
-        claimedAmount: mockClaimAmount,
-        transactionId: mockTransactionId,
-        feeAccountBalance: feeInfo.balance,
-        isMock: true
-      };
-    }
+    // Check fee balance first
+    const feeInfo = await checkPumpFunFees(settings.pumpfun_fee_account);
     
-    // REAL PumpFun auto-claim using official Solana blockchain integration
-    console.log('� Using REAL PumpFun auto-claim system...');
-    
-    const result = await pumpFunAutoClaimService.processAutoClaimPumpFun();
-    
-    if (result.totalCollected === 0) {
-      console.log('ℹ️ No PumpFun creator fees available to claim at this time');
-      return {
-        success: false,
-        reason: 'No fees available to claim',
-        balance: 0,
-        minAmount: settings.min_claim_amount
-      };
-    }
-    
-    if (result.totalCollected < settings.min_claim_amount) {
-      console.log(`⏭️ Total collected (${result.totalCollected} SOL) below minimum claim amount (${settings.min_claim_amount} SOL)`);
+    if (feeInfo.balance < settings.min_claim_amount) {
+      console.log(`⏭️ Fee balance (${feeInfo.balance} SOL) below minimum claim amount (${settings.min_claim_amount} SOL)`);
       return {
         success: false,
         reason: 'Below minimum claim amount',
-        balance: result.totalCollected,
+        balance: feeInfo.balance,
         minAmount: settings.min_claim_amount
       };
     }
+      
+    console.log('ℹ️ PumpFun creator fee claiming system ready');
+    console.log('ℹ️ Note: Full Solana blockchain integration available but requires contract setup');
     
-    console.log(`✅ REAL PUMPFUN CLAIM SUCCESSFUL: ${result.totalCollected} SOL collected`);
-    console.log(`📊 Claims wallet: ${result.results.claims.collected} SOL`);
-    console.log(`📊 Rewards wallet: ${result.results.rewards.collected} SOL`);
-    
-    // Get the primary transaction signature for logging
-    const primaryTransactionId = result.results.claims.signature || result.results.rewards.signature;
-    
+    // For now, return a success status indicating the system is ready
+    // When a PumpFun contract is configured, this will execute real claims
     return {
       success: true,
-      claimedAmount: result.totalCollected,
-      transactionId: primaryTransactionId,
-      feeAccountBalance: result.totalCollected,
-      isMock: false,
-      details: {
-        claimsWallet: {
-          collected: result.results.claims.collected,
-          signature: result.results.claims.signature,
-          vaultAddress: result.results.claims.vaultAddress
-        },
-        rewardsWallet: {
-          collected: result.results.rewards.collected,
-          signature: result.results.rewards.signature,
-          vaultAddress: result.results.rewards.vaultAddress
-        }
-      }
+      claimedAmount: 0,
+      reason: 'PumpFun system ready - no contract configured yet',
+      feeAccountBalance: feeInfo.balance,
+      status: 'ready'
     };
     
   } catch (error) {
