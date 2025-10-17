@@ -54,70 +54,99 @@ function getSupabaseAdminClient() {
 }
 
 /**
- * Test database connection
+ * Helper function to wait with exponential backoff
+ */
+async function waitWithBackoff(attemptNumber) {
+  await new Promise(resolve => setTimeout(resolve, 1000 * attemptNumber));
+}
+
+/**
+ * Helper function to test a single database connection
+ */
+async function testSingleConnection(attemptNumber) {
+  const supabase = getSupabaseClient();
+  
+  if (!supabase) {
+    return {
+      success: false,
+      error: 'Supabase client not available'
+    };
+  }
+  
+  // Simple test query - check if locations table exists
+  const { error } = await supabase
+    .from('locations')
+    .select('id')
+    .limit(1);
+  
+  if (error) {
+    console.warn(`Database connection attempt ${attemptNumber} failed:`, error.message);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+  
+  console.log(`✅ Database connection successful (attempt ${attemptNumber})`);
+  return {
+    success: true
+  };
+}
+
+/**
+ * Handle connection attempt result
+ */
+async function handleConnectionResult(result, attempts, maxRetries) {
+  if (result.success) {
+    return { success: true, attempts };
+  }
+  
+  if (attempts < maxRetries) {
+    await waitWithBackoff(attempts);
+    return null; // Continue trying
+  }
+  
+  return { success: false, error: result.error, attempts };
+}
+
+/**
+ * Handle connection error
+ */
+async function handleConnectionError(error, attempts, maxRetries) {
+  console.warn(`Database connection attempt ${attempts} failed:`, error);
+  
+  if (attempts < maxRetries) {
+    await waitWithBackoff(attempts);
+    return null; // Continue trying
+  }
+  
+  return {
+    success: false,
+    error: error instanceof Error ? error.message : 'Unknown error',
+    attempts
+  };
+}
+
+/**
+ * Test database connection with retries
  */
 async function testDatabaseConnection(maxRetries = 3) {
-  let attempts = 0;
-  
-  while (attempts < maxRetries) {
-    attempts++;
-    
+  for (let attempts = 1; attempts <= maxRetries; attempts++) {
     try {
-      const supabase = getSupabaseClient();
-      
-      if (!supabase) {
-        console.warn('❌ No Supabase client available');
-        return {
-          success: false,
-          error: 'Supabase client not available',
-          attempts
-        };
-      }
-      
-      // Simple test query - check if locations table exists
-      const { error } = await supabase
-        .from('locations')
-        .select('id')
-        .limit(1);
-      
-      if (error) {
-        console.warn(`Database connection attempt ${attempts} failed:`, error.message);
-        if (attempts < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, 1000 * attempts)); // Exponential backoff
-          continue;
-        }
-        return {
-          success: false,
-          error: error.message,
-          attempts
-        };
-      }
-      
-      console.log(`✅ Database connection successful (attempt ${attempts})`);
-      return {
-        success: true,
-        attempts
-      };
+      const result = await testSingleConnection(attempts);
+      const handleResult = await handleConnectionResult(result, attempts, maxRetries);
+      if (handleResult) return handleResult;
       
     } catch (error) {
-      console.warn(`Database connection attempt ${attempts} failed:`, error);
-      if (attempts < maxRetries) {
-        await new Promise(resolve => setTimeout(resolve, 1000 * attempts)); // Exponential backoff
-        continue;
-      }
-      
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
-        attempts
-      };
+      const handleResult = await handleConnectionError(error, attempts, maxRetries);
+      if (handleResult) return handleResult;
     }
   }
   
   return {
     success: false,
     error: 'Max retry attempts reached',
-    attempts
+    attempts: maxRetries
   };
 }
 
