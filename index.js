@@ -155,6 +155,7 @@ const getRouteDefinitions = () => {
     { path: '/api/admin/social/update-followers', file: './api/admin/social/update-followers.js' },
     { path: '/api/admin/stats', file: './api/admin/stats.js' },
     { path: '/api/admin/toggle-live', file: './api/admin/toggle-live.js' },
+    { path: '/api/admin/upload-tracking', file: './api/admin/upload-tracking.js' },
     { path: '/api/admin/users', file: './api/admin/users.js' },
     
     // Analytics routes
