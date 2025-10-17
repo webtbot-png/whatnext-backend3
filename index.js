@@ -1,7 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('node:path');
-const { initializeDatabase } = require('./database.js');
+// Resolve database module path using __dirname to avoid MODULE_NOT_FOUND when running in containers
+const _dbPath = path.join(__dirname, 'database.js');
+const { initializeDatabase } = require(_dbPath);
 const { startDividendCron } = require('./api/services/dividend-cron.js');
 
 const app = express();
