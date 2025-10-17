@@ -240,7 +240,7 @@ router.post('/start-batch', async (req, res) => {
   try {
     verifyAdminToken(req);
     
-    const { folderTitle, folderDescription, files } = req.body;
+    const { folderTitle, folderDescription, files, contentMetadata } = req.body;
     
     if (!folderTitle || !files || !Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ 
@@ -254,26 +254,57 @@ router.post('/start-batch', async (req, res) => {
     const supabase = getSupabaseAdminClient();
     
     console.log(`📁 Starting batch upload: ${batchId} - "${folderTitle}" (${files.length} files)`);
+    console.log(`📋 Content metadata:`, contentMetadata);
     
-    // Create content entries for all files
+    // Create content entries for all files with FULL metadata
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       const partNumber = i + 1;
       
-      // Create content entry with folder-based naming
+      // Create content entry with ALL metadata from batch form
       const contentEntry = {
+        // Basic info
         title: `${folderTitle} - Part ${partNumber}`,
         description: folderDescription || `Part ${partNumber} of ${folderTitle}`,
-        content_type: 'video',
-        media_type: 'upload',
-        media_url: '[UPLOADING]',
-        status: 'uploading',
-        visibility: 'public',
+        
+        // Metadata from batch form (same as manual entry)
+        content_type: contentMetadata?.content_type || 'video',
+        media_type: contentMetadata?.media_type || 'video',
+        media_url: '[PENDING]',
+        
+        // Location
+        location_id: contentMetadata?.location_id || null,
+        custom_location: contentMetadata?.custom_location || null,
+        
+        // Scheduling
+        event_date: contentMetadata?.event_date || null,
+        event_time: contentMetadata?.event_time || null,
+        
+        // Visibility and status
+        status: contentMetadata?.status || 'published',
+        visibility: contentMetadata?.visibility || 'public',
+        
+        // Tags and category
+        tags: contentMetadata?.tags || `${folderTitle},Part ${partNumber}`,
+        category: contentMetadata?.category || null,
+        
+        // Features
+        is_featured: contentMetadata?.is_featured || false,
+        is_pinned: contentMetadata?.is_pinned || false,
+        
+        // Technical
+        timezone: contentMetadata?.timezone || 'UTC',
+        metadata: contentMetadata?.metadata || JSON.stringify({
+          batch_upload: true,
+          folder_title: folderTitle,
+          part_number: partNumber
+        }),
+        
+        // Batch tracking
         folder_title: folderTitle,
         folder_description: folderDescription,
         part_number: partNumber,
-        batch_id: batchId,
-        tags: [folderTitle, `Part ${partNumber}`]
+        batch_id: batchId
       };
       
       const { data: newEntry, error } = await supabase
