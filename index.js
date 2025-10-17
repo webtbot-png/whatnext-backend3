@@ -258,8 +258,13 @@ async function startServer() {
     console.log('✅ Database initialized successfully');
     
     // Start dividend auto-claim system
-    startDividendCron();
-    console.log('✅ Dividend cron system started');
+    try {
+      startDividendCron();
+      console.log('✅ Dividend cron system started');
+    } catch (dividendError) {
+      console.error('❌ Failed to start dividend cron system:', dividendError.message);
+      console.log('⚠️ Server will continue without dividend auto-claiming');
+    }
   } catch (error) {
     console.error('❌ Database initialization failed:', error);
   }
