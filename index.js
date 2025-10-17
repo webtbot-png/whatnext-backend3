@@ -26,35 +26,45 @@ app.use('/api/admin/upload', (req, res, next) => {
   next();
 }, require('./api/admin/upload.js'));
 
-// Middleware - EXCLUDE upload routes from JSON parsing (except credentials)
+// Middleware - EXCLUDE upload routes from JSON parsing (except credentials and upload-tracking)
 app.use((req, res, next) => {
   // Allow JSON parsing for credentials endpoint
   if (req.path.includes('/upload/credentials')) {
     console.log('✅ Allowing JSON parsing for credentials endpoint:', req.path);
-    return express.json({ limit: '2gb' })(req, res, next);
+    return express.json({ limit: '50gb' })(req, res, next);
   }
-  // Skip JSON parsing for other file upload routes
+  // Allow JSON parsing for upload-tracking endpoints (they handle JSON, not files)
+  if (req.path.includes('/upload-tracking')) {
+    console.log('✅ Allowing JSON parsing for upload-tracking endpoint:', req.path);
+    return express.json({ limit: '50gb' })(req, res, next);
+  }
+  // Skip JSON parsing for file upload routes only
   if (req.path.includes('/upload') || req.url.includes('/upload')) {
     console.log('🚫 Skipping JSON parsing for upload route:', req.path, req.url);
     return next();
   }
   // Apply JSON parsing to all other routes
-  express.json({ limit: '2gb' })(req, res, next);
+  express.json({ limit: '50gb' })(req, res, next);
 });
 
 app.use((req, res, next) => {
   // Allow URL encoding for credentials endpoint
   if (req.path.includes('/upload/credentials')) {
     console.log('✅ Allowing URL encoding for credentials endpoint:', req.path);
-    return express.urlencoded({ extended: true, limit: '2gb' })(req, res, next);
+    return express.urlencoded({ extended: true, limit: '50gb' })(req, res, next);
   }
-  // Skip URL encoding for other file upload routes
+  // Allow URL encoding for upload-tracking endpoints (they handle JSON, not files)
+  if (req.path.includes('/upload-tracking')) {
+    console.log('✅ Allowing URL encoding for upload-tracking endpoint:', req.path);
+    return express.urlencoded({ extended: true, limit: '50gb' })(req, res, next);
+  }
+  // Skip URL encoding for file upload routes only
   if (req.path.includes('/upload') || req.url.includes('/upload')) {
     console.log('🚫 Skipping URL encoding for upload route:', req.path, req.url);
     return next();
   }
   // Apply URL encoding to all other routes
-  express.urlencoded({ extended: true, limit: '2gb' })(req, res, next);
+  express.urlencoded({ extended: true, limit: '50gb' })(req, res, next);
 });// Health check
 app.get('/', (req, res) => {
   res.json({
