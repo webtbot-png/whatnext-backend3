@@ -1,16 +1,6 @@
 const { Connection, PublicKey, Transaction, sendAndConfirmTransaction, Keypair } = require('@solana/web3.js');
+const { getSupabaseAdminClient } = require('../../database.js');
 const crypto = require('node:crypto');
-
-// Import from master database using dynamic import since it's ES modules
-let getSupabaseAdminClient;
-
-async function initDatabase() {
-  if (!getSupabaseAdminClient) {
-    const db = await import('../../../database/database.js');
-    getSupabaseAdminClient = db.getSupabaseAdminClient;
-  }
-  return getSupabaseAdminClient();
-}
 
 // Solana connection
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
@@ -40,7 +30,7 @@ function decryptPrivateKey(encryptedKey, encryptionPassword) {
  * Get the current auto-claim settings
  */
 async function getAutoClaimSettings() {
-  const supabase = await initDatabase();
+  const supabase = getSupabaseAdminClient();
   
   const { data, error } = await supabase
     .from('auto_claim_settings')
@@ -200,7 +190,7 @@ async function claimPumpFunFees(settings) {
  * Save holder snapshot to database
  */
 async function saveHolderSnapshot(claimId, holders) {
-  const supabase = await initDatabase();
+  const supabase = getSupabaseAdminClient();
   
   const snapshots = holders.map(holder => ({
     claim_id: claimId,
@@ -224,7 +214,7 @@ async function saveHolderSnapshot(claimId, holders) {
  * Update holder stats table
  */
 async function updateHolderStats(holders, claimId, distributionAmount) {
-  const supabase = await initDatabase();
+  const supabase = getSupabaseAdminClient();
   
   for (const holder of holders) {
     const dividendAmount = (distributionAmount * holder.percentage) / 100;
@@ -255,7 +245,7 @@ async function updateHolderStats(holders, claimId, distributionAmount) {
  * Create dividend distributions
  */
 async function createDividendDistributions(claimId, holders, distributionAmount) {
-  const supabase = await initDatabase();
+  const supabase = getSupabaseAdminClient();
   
   const distributions = holders.map(holder => {
     const dividendAmount = (distributionAmount * holder.percentage) / 100;
@@ -314,7 +304,7 @@ async function processDividendClaim(forceRun = false) {
     }
     
     // Start claim process
-    const supabase = await initDatabase();
+    const supabase = getSupabaseAdminClient();
     
     // Claim fees from PumpFun
     const claimResult = await claimPumpFunFees(settings);
