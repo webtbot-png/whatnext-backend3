@@ -77,11 +77,16 @@ router.get('/status', async (req, res) => {
     const nextClaimTime = lastClaimTime + claimInterval * 1000;
     const nextClaimIn = Math.max(0, Math.floor((nextClaimTime - Date.now()) / 1000));
 
+    // Calculate claimable amounts - PumpFun style
+    const totalEarned = totalClaimed + (totalClaimed * 0.1); // Mock: assume 10% still available to claim
+    const availableToClaim = totalClaimed * 0.1; // Mock: 10% of total claimed is available
+    const claimableBalance = availableToClaim; // Same as available to claim
+    
     // Mock user data (in real implementation, this would come from wallet connection)
     const mockUserData = {
       yourBalance: 10000, // Mock token balance
       yourPercentage: 0.1, // Mock percentage
-      pendingDividends: 0.005 // Mock pending dividends
+      pendingDividends: Math.max(0.001, totalDistributed * 0.001) // Small portion of total distributed
     };
 
     const response = {
@@ -100,6 +105,12 @@ router.get('/status', async (req, res) => {
         holdersCount: claim.holder_count,
         transactionId: claim.transaction_id
       })) || [],
+      // PumpFun-style claiming data
+      totalEarned,
+      totalClaims: claimHistory?.length || 0,
+      availableToClaim,
+      claimableBalance,
+      lastClaimTimestamp: lastClaim ? lastClaim.claim_timestamp : null,
       ...mockUserData
     };
 
