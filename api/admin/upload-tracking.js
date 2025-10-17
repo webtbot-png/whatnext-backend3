@@ -272,9 +272,9 @@ router.post('/start-batch', async (req, res) => {
         media_type: contentMetadata?.media_type || 'video',
         media_url: '[PENDING]',
         
-        // Location
-        location_id: contentMetadata?.location_id || null,
-        custom_location: contentMetadata?.custom_location || null,
+        // Location - Handle country codes vs UUIDs
+        location_id: (contentMetadata?.location_id && contentMetadata.location_id.startsWith('country-')) ? null : contentMetadata?.location_id || null,
+        custom_location: contentMetadata?.custom_location || (contentMetadata?.location_id && contentMetadata.location_id.startsWith('country-') ? contentMetadata.location_id : null),
         
         // Scheduling
         event_date: contentMetadata?.event_date || null,
