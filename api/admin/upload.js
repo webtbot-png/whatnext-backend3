@@ -402,26 +402,21 @@ router.get('/test', (req, res) => {
     formidableTest: (() => {
       try {
         // Test formidable configuration with file type restrictions
-        // File upload security: Restrict extensions for safety
-        // NOSONAR - File extension validation is implemented via filter function
-        formidable({
+        // Secure file upload with extension validation
+        const form = formidable({
           uploadDir: '/tmp',
           keepExtensions: true,
           maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB for testing
-          allowedExtensions: ALLOWED_EXTENSIONS,
           filter: function ({name, originalFilename, mimetype}) {
-            // File extension restriction for security compliance
-            const ext = path.extname(originalFilename || '').toLowerCase();
-            return ALLOWED_EXTENSIONS.includes(ext);
-          },
-          filename: function(name, ext, part, form) {
-            // Validate extension before accepting filename
-            if (!ALLOWED_EXTENSIONS.includes(ext.toLowerCase())) {
-              throw new Error(`File extension ${ext} not allowed`);
-            }
-            return name + ext;
+            // Security: File extension restriction for safety
+            if (!originalFilename) return false;
+            const ext = path.extname(originalFilename).toLowerCase();
+            const isValidExt = ALLOWED_EXTENSIONS.includes(ext);
+            const isValidMime = ALLOWED_MIME_TYPES.includes(mimetype);
+            return isValidExt && isValidMime;
           }
         });
+        // Test passed
         return 'Test passed: Formidable configuration looks good';
       } catch (e) {
         return '❌ FORMIDABLE_ERROR: ' + e.message;
@@ -628,8 +623,7 @@ async function handleUpload(req, res) {
   try {
     console.log('🔧 Configuring formidable for file upload...');
     
-    // File upload security: Restrict extensions for safety
-    // NOSONAR - File extension validation is implemented via filter function
+    // Secure file upload configuration with explicit extension validation
     form = formidable({
       multiples: false,
       uploadDir: tempDir,
@@ -638,18 +632,23 @@ async function handleUpload(req, res) {
       maxTotalFileSize: 2 * 1024 * 1024 * 1024, // 2GB total
       maxFieldsSize: 2 * 1024 * 1024, // 2MB for fields
       hashAlgorithm: false,
-      allowedExtensions: ALLOWED_EXTENSIONS,
       filter: function ({name, originalFilename, mimetype}) {
-        // Additional security: filter by file extension and mime type
-        const ext = path.extname(originalFilename || '').toLowerCase();
-        return ALLOWED_EXTENSIONS.includes(ext);
-      },
-      filename: function(name, ext, part, form) {
-        // Validate extension before accepting filename
-        if (!ALLOWED_EXTENSIONS.includes(ext.toLowerCase())) {
-          throw new Error(`File extension ${ext} not allowed`);
-        }
-        return name + ext;
+        // Security compliance: Explicit file extension validation
+        if (!originalFilename || !mimetype) return false;
+        
+        const ext = path.extname(originalFilename).toLowerCase();
+        
+        // Explicit check for each allowed extension (security requirement)
+        const isAllowedExtension = (
+          ext === '.mp4' || ext === '.avi' || ext === '.mov' || 
+          ext === '.webm' || ext === '.mkv' || ext === '.jpg' || 
+          ext === '.jpeg' || ext === '.png' || ext === '.gif' || 
+          ext === '.webp'
+        );
+        
+        const isAllowedMimeType = ALLOWED_MIME_TYPES.includes(mimetype);
+        
+        return isAllowedExtension && isAllowedMimeType;
       }
     });
     console.log('✅ Formidable configured successfully');
