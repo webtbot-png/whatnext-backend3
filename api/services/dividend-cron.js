@@ -9,7 +9,7 @@ let isRunning = false;
  */
 function startDividendCron() {
   if (cronJob) {
-    console.log('🔄 Dividend cron job already running');
+    // Silently skip if already running to prevent spam
     return;
   }
   
@@ -23,13 +23,17 @@ function startDividendCron() {
     try {
       isRunning = true;
       
-      console.log('🔍 Checking if dividend claim should run...');
-      
+      // Check silently to reduce log spam
       const shouldRun = await shouldRunClaim();
       if (!shouldRun) {
-        console.log('⏰ Not time for dividend claim yet');
+        // Only log every 10th check to reduce spam
+        if (Math.random() < 0.1) {
+          console.log('⏰ Dividend claim check: not time yet');
+        }
         return;
       }
+      
+      console.log('🔍 Dividend claim check: time to run!');
       
       console.log('🚀 Starting scheduled dividend claim...');
       const result = await processDividendClaim(false); // false = respect schedule
