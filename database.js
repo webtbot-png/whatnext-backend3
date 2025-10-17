@@ -151,7 +151,178 @@ async function testDatabaseConnection(maxRetries = 3) {
 }
 
 /**
- * Initialize database with health checks
+ * Check if database schema has folder support and provide migration guidance
+ */
+async function checkFolderSchemaSupport() {
+  try {
+    const supabase = getSupabaseAdminClient();
+    
+    if (!supabase) {
+      console.log('⚠️  Admin client not available for schema check');
+      return false;
+    }
+    
+    // Test each required column individually to provide detailed feedback
+    const requiredColumns = [
+      'folder_title',
+      'folder_description', 
+      'batch_id',
+      'part_number'
+    ];
+    
+    const missingColumns = [];
+    
+    for (const column of requiredColumns) {
+      try {
+        const { error } = await supabase
+          .from('content_entries')
+          .select(column)
+          .limit(1);
+        
+        if (error && (error.message.includes(`column "${column}" does not exist`) || 
+                      error.message.includes(`relation "content_entries" does not exist`))) {
+          missingColumns.push(column);
+        }
+      } catch (columnError) {
+        console.log(`⚠️  Could not check column ${column}:`, columnError.message);
+        missingColumns.push(column);
+      }
+    }
+    
+    if (missingColumns.length > 0) {
+      console.log('📊 Database schema needs updating for folder/batch upload support...');
+      console.log('');
+      console.log('🔧 Please run this SQL in your Supabase SQL Editor:');
+      console.log('');
+      console.log('-- Add folder support columns to content_entries table');
+      console.log('ALTER TABLE content_entries ADD COLUMN IF NOT EXISTS folder_title TEXT;');
+      console.log('ALTER TABLE content_entries ADD COLUMN IF NOT EXISTS folder_description TEXT;');
+      console.log('ALTER TABLE content_entries ADD COLUMN IF NOT EXISTS batch_id TEXT;');
+      console.log('ALTER TABLE content_entries ADD COLUMN IF NOT EXISTS part_number INTEGER;');
+      console.log('');
+      console.log('-- Add indexes for better performance');
+      console.log('CREATE INDEX IF NOT EXISTS idx_content_entries_folder_title ON content_entries(folder_title);');
+      console.log('CREATE INDEX IF NOT EXISTS idx_content_entries_batch_id ON content_entries(batch_id);');
+      console.log('');
+      console.log(`❌ Missing columns: ${missingColumns.join(', ')}`);
+      return false;
+    }
+    
+    console.log('✅ Database schema supports folder organization and batch uploads');
+    return true;
+    
+  } catch (schemaError) {
+    console.log('⚠️  Schema verification failed (this may be normal for new databases):', schemaError.message);
+    console.log('💡 If you have a content_entries table, please ensure it has folder support columns');
+    return false; // Fail safe - require manual verification
+  }
+}
+
+/**
+ * Helper function to group content by folder title
+ */
+function groupContentByFolder(contentGroups) {
+  const folderGroups = {};
+  if (contentGroups) {
+    for (const content of contentGroups) {
+      if (!folderGroups[content.folder_title]) {
+        folderGroups[content.folder_title] = [];
+      }
+      folderGroups[content.folder_title].push(content);
+    }
+  }
+  return folderGroups;
+}
+
+/**
+ * Helper function to update part numbers for a folder
+ */
+async function updateFolderPartNumbers(supabase, folderTitle, contents) {
+  let successCount = 0;
+  
+  for (let i = 0; i < contents.length; i++) {
+    const content = contents[i];
+    const partNumber = i + 1;
+    
+    const { error } = await supabase
+      .from('content_entries')
+      .update({ 
+        part_number: partNumber,
+        folder_description: `${folderTitle} - ${contents.length} part${contents.length > 1 ? 's' : ''}`
+      })
+      .eq('id', content.id);
+    
+    if (!error) {
+      successCount++;
+    }
+  }
+  
+  return successCount;
+}
+
+/**
+ * Migrate existing content to use folder structure based on matching titles
+ */
+async function migrateExistingContentToFolders() {
+  try {
+    const supabase = getSupabaseAdminClient();
+    
+    if (!supabase) {
+      console.log('⚠️  Admin client not available for content migration');
+      return { success: false, error: 'Admin client not available' };
+    }
+    
+    console.log('🔄 Migrating existing content to folder structure...');
+    
+    // First, set folder_title based on existing titles
+    const { error: updateError } = await supabase
+      .from('content_entries')
+      .update({ folder_title: supabase.raw('title') })
+      .is('folder_title', null);
+    
+    if (updateError) {
+      console.error('❌ Failed to migrate content to folders:', updateError);
+      return { success: false, error: updateError.message };
+    }
+    
+    // Get content for part number assignment
+    const { data: contentGroups, error: groupError } = await supabase
+      .from('content_entries')
+      .select('id, folder_title, created_at')
+      .not('folder_title', 'is', null)
+      .order('folder_title, created_at');
+    
+    if (groupError) {
+      console.error('❌ Failed to fetch content for part numbering:', groupError);
+      return { success: false, error: groupError.message };
+    }
+    
+    // Group content and assign part numbers
+    const folderGroups = groupContentByFolder(contentGroups);
+    let totalUpdated = 0;
+    
+    for (const [folderTitle, contents] of Object.entries(folderGroups)) {
+      const updated = await updateFolderPartNumbers(supabase, folderTitle, contents);
+      totalUpdated += updated;
+    }
+    
+    const folderCount = Object.keys(folderGroups).length;
+    console.log(`✅ Migrated ${totalUpdated} content entries into ${folderCount} folders`);
+    
+    return { 
+      success: true, 
+      migratedEntries: totalUpdated, 
+      foldersCreated: folderCount 
+    };
+    
+  } catch (migrationError) {
+    console.error('❌ Content migration failed:', migrationError);
+    return { success: false, error: migrationError.message };
+  }
+}
+
+/**
+ * Initialize database with health checks and schema verification
  */
 async function initializeDatabase() {
   try {
@@ -165,6 +336,17 @@ async function initializeDatabase() {
     }
     
     console.log('✅ Database connected and ready');
+    
+    // Check schema for folder/batch upload support
+    const hasSchemaSupport = await checkFolderSchemaSupport();
+    
+    if (hasSchemaSupport) {
+      console.log('🚀 All upload features are ready (single + batch + folders)');
+    } else {
+      console.log('⚠️  Folder/batch upload features require database schema update');
+      console.log('📖 Single uploads will work, but batch uploads need schema migration');
+    }
+    
     return true;
     
   } catch (error) {
@@ -192,5 +374,7 @@ module.exports = {
   getSupabaseAdminClient,
   testDatabaseConnection,
   initializeDatabase,
-  gracefulShutdownHandler
+  gracefulShutdownHandler,
+  checkFolderSchemaSupport,
+  migrateExistingContentToFolders
 };
