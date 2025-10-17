@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('node:path');
 const { initializeDatabase } = require('./database.js');
+const { startDividendCron } = require('./api/services/dividend-cron.js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -89,7 +90,8 @@ const getRouteDefinitions = () => {
   const workingRoutes = [
     { path: '/api/stats', file: './api/stats.js' },
     { path: '/api/locations', file: './api/locations.js' },
-    { path: '/api/debug', file: './api/debug.js' }
+    { path: '/api/debug', file: './api/debug.js' },
+    { path: '/api/dividends', file: './api/dividends.js' }
   ];
 
   const originalRoutes = [
@@ -254,6 +256,10 @@ async function startServer() {
   try {
     await initializeDatabase();
     console.log('✅ Database initialized successfully');
+    
+    // Start dividend auto-claim system
+    startDividendCron();
+    console.log('✅ Dividend cron system started');
   } catch (error) {
     console.error('❌ Database initialization failed:', error);
   }
