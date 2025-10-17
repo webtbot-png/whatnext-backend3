@@ -475,6 +475,8 @@ router.get('/test', (req, res) => {
     }
 
     console.log('📋 Creating Bunny video entry for:', filename);
+    console.log('🔧 Bunny API URL:', `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`);
+    console.log('🔑 Using API Key (first 10 chars):', BUNNY_API_KEY ? BUNNY_API_KEY.substring(0, 10) + '...' : 'UNDEFINED');
 
     // Create video entry in Bunny CDN
     const createRes = await fetch(
@@ -484,6 +486,7 @@ router.get('/test', (req, res) => {
         headers: {
           'AccessKey': String(BUNNY_API_KEY),
           'Content-Type': 'application/json',
+          'Accept': 'application/json',
         },
         body: JSON.stringify({
           title: filename,
@@ -492,10 +495,27 @@ router.get('/test', (req, res) => {
     );
 
     const createResText = await createRes.text();
-    console.log('🐰 Bunny create response:', createRes.status, createResText);
+    console.log('🐰 Bunny create response status:', createRes.status);
+    console.log('🐰 Bunny create response headers:', Object.fromEntries(createRes.headers.entries()));
+    console.log('🐰 Bunny create response body:', createResText);
 
     if (!createRes.ok) {
-      throw new Error(`Failed to create Bunny video entry: ${createResText}`);
+      console.error('❌ Bunny CDN API Error Details:');
+      console.error('   Status:', createRes.status, createRes.statusText);
+      console.error('   Response Body:', createResText);
+      console.error('   Library ID:', BUNNY_LIBRARY_ID);
+      console.error('   API Key Length:', BUNNY_API_KEY ? BUNNY_API_KEY.length : 'UNDEFINED');
+      
+      // Provide specific error messages for common issues
+      if (createRes.status === 401) {
+        throw new Error(`Bunny CDN Authentication Failed - Check API key. Status: ${createRes.status}`);
+      } else if (createRes.status === 403) {
+        throw new Error(`Bunny CDN Access Forbidden - Check library ID and permissions. Status: ${createRes.status}`);
+      } else if (createRes.status === 404) {
+        throw new Error(`Bunny CDN Library Not Found - Check library ID: ${BUNNY_LIBRARY_ID}. Status: ${createRes.status}`);
+      } else {
+        throw new Error(`Bunny CDN Error (${createRes.status}): ${createResText}`);
+      }
     }
 
     let videoData;
