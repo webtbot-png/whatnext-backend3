@@ -284,8 +284,10 @@ router.post('/start-batch', async (req, res) => {
         status: contentMetadata?.status || 'published',
         visibility: contentMetadata?.visibility || 'public',
         
-        // Tags and category
-        tags: contentMetadata?.tags || `${folderTitle},Part ${partNumber}`,
+        // Tags and category - Convert to PostgreSQL array format
+        tags: contentMetadata?.tags ? 
+          '{' + contentMetadata.tags.split(',').map(tag => '"' + tag.trim() + '"').join(',') + '}' : 
+          '{"' + folderTitle + '","Part ' + partNumber + '"}',
         category: contentMetadata?.category || null,
         
         // Features
