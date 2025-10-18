@@ -8,13 +8,24 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-t
 // In-memory upload tracking (in production, use Redis or database)
 const uploadSessions = new Map();
 
-// Memory management configuration
+// Memory management configuration with enhanced retry settings
 const MEMORY_CONFIG = {
   MAX_SESSIONS: 100,           // Maximum sessions to keep in memory
   CLEANUP_INTERVAL: 5 * 60 * 1000,  // Cleanup every 5 minutes
-  SESSION_TIMEOUT: 2 * 60 * 60 * 1000,  // Sessions expire after 2 hours
-  COMPLETED_RETENTION: 30 * 60 * 1000,  // Keep completed sessions for 30 minutes
-  FAILED_RETENTION: 10 * 60 * 1000      // Keep failed sessions for 10 minutes
+  SESSION_TIMEOUT: 4 * 60 * 60 * 1000,  // Sessions expire after 4 hours (increased)
+  COMPLETED_RETENTION: 60 * 60 * 1000,  // Keep completed sessions for 1 hour (increased)
+  FAILED_RETENTION: 30 * 60 * 1000,     // Keep failed sessions for 30 minutes (increased)
+  MAX_RETRY_ATTEMPTS: 5,       // Maximum retry attempts for failed operations
+  RETRY_DELAY_BASE: 1000,      // Base delay for exponential backoff (1 second)
+  HEARTBEAT_INTERVAL: 30 * 1000, // Send heartbeat every 30 seconds
+  STALE_SESSION_THRESHOLD: 10 * 60 * 1000, // Mark sessions stale after 10 minutes
+  PERSISTENT_RETRY_INTERVAL: 60 * 1000, // Check for failed uploads every minute
+  RETRY_CONFIG: {
+    MAX_ATTEMPTS: 5,           // Maximum retry attempts
+    BACKOFF_BASE: 1000,        // Base backoff delay (1 second)
+    BACKOFF_MAX: 16000,        // Maximum backoff delay (16 seconds)
+    RECOVERY_INTERVAL: 30 * 1000 // Auto-recovery check interval (30 seconds)
+  }
 };
 
 // Cleanup function to prevent memory leaks
@@ -77,6 +88,267 @@ function cleanupStaleSessions() {
 
 // Start automatic cleanup interval
 setInterval(cleanupStaleSessions, MEMORY_CONFIG.CLEANUP_INTERVAL);
+
+// Start automatic retry mechanism for failed uploads
+setInterval(retryFailedUploads, MEMORY_CONFIG.PERSISTENT_RETRY_INTERVAL);
+
+// Auto-Recovery Functions
+async function recoverStalledUploads() {
+  try {
+    console.log('🔄 Starting automatic recovery of stalled uploads...');
+    
+    // Load sessions from database
+    await loadSessionsFromDatabase();
+    
+    const now = Date.now();
+    let recoveredCount = 0;
+    let failedCount = 0;
+    
+    const allSessions = Array.from(uploadSessions.values());
+    
+    for (const session of allSessions) {
+      const timeSinceUpdate = now - new Date(session.lastUpdate).getTime();
+      const isStale = timeSinceUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD;
+      
+      if (session.status === 'uploading' && isStale) {
+        if (session.isRecoverable && session.retryCount < session.maxRetries) {
+          session.status = 'pending';
+          session.error = `Auto-recovered from stale state (${Math.round(timeSinceUpdate / 1000)}s)`;
+          session.retryCount = (session.retryCount || 0) + 1;
+          session.lastUpdate = new Date().toISOString();
+          session.lastHeartbeat = new Date().toISOString();
+          
+          await persistSessionToDatabase(session);
+          recoveredCount++;
+          
+          console.log(`🔄 Auto-recovered stale session: ${session.id.slice(0, 12)}... (${session.filename})`);
+        } else {
+          session.status = 'failed';
+          session.error = 'Max retries exceeded - marked as failed';
+          session.isRecoverable = false;
+          session.lastUpdate = new Date().toISOString();
+          
+          await persistSessionToDatabase(session);
+          failedCount++;
+          
+          console.log(`❌ Marked unrecoverable session as failed: ${session.id.slice(0, 12)}...`);
+        }
+      }
+    }
+    
+    if (recoveredCount > 0 || failedCount > 0) {
+      console.log(`✅ Auto-recovery complete: ${recoveredCount} recovered, ${failedCount} failed`);
+    }
+    
+    return { recoveredCount, failedCount };
+    
+  } catch (error) {
+    console.error('❌ Error during auto-recovery:', error);
+    return { recoveredCount: 0, failedCount: 0, error: error.message };
+  }
+}
+
+// Database persistence functions
+async function persistSessionToDatabase(session) {
+  try {
+    const supabase = getSupabaseAdminClient();
+    
+    // Create a clean copy for database storage
+    const sessionData = {
+      session_id: session.id,
+      content_entry_id: session.contentEntryId,
+      filename: session.filename,
+      original_name: session.originalName || session.filename,
+      content_type: session.contentType || 'video/mp4',
+      file_size: session.fileSize || 0,
+      status: session.status,
+      progress: session.progress || 0,
+      error_message: session.error,
+      folder_title: session.folderTitle,
+      folder_description: session.folderDescription,
+      batch_id: session.batchId,
+      part_number: session.partNumber,
+      retry_count: session.retryCount || 0,
+      max_retries: session.maxRetries || MEMORY_CONFIG.RETRY_CONFIG.MAX_ATTEMPTS,
+      is_recoverable: session.isRecoverable !== false,
+      network_errors: JSON.stringify(session.networkErrors || []),
+      bunny_video_id: session.bunnyVideoId,
+      bunny_upload_url: session.bunnyUploadUrl,
+      final_url: session.finalUrl,
+      steps: JSON.stringify(session.steps || {}),
+      metadata: JSON.stringify(session.metadata || {}),
+      start_time: session.startTime || session.createdAt,
+      last_update: session.lastUpdate,
+      last_heartbeat: session.lastHeartbeat,
+      created_at: session.createdAt || session.startTime
+    };
+    
+    // Use upsert with Supabase
+    const { error } = await supabase
+      .from('upload_sessions')
+      .upsert(sessionData, { 
+        onConflict: 'session_id'
+      });
+    
+    if (error) {
+      console.error('❌ Failed to persist session to database:', error);
+      return false;
+    }
+    
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Failed to persist session to database:', error);
+    // Don't throw - we want uploads to continue even if DB persistence fails
+    return false;
+  }
+}
+
+async function loadSessionsFromDatabase() {
+  try {
+    const supabase = getSupabaseAdminClient();
+    
+    // Only load sessions from the last 24 hours to avoid overloading memory
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    
+    const { data: sessions, error } = await supabase
+      .from('upload_sessions')
+      .select('*')
+      .gte('created_at', twentyFourHoursAgo)
+      .not('status', 'in', '(completed,failed)')
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error('❌ Failed to load sessions from database:', error);
+      return 0;
+    }
+    
+    let loadedCount = 0;
+    
+    for (const row of sessions || []) {
+      const sessionId = row.session_id;
+      
+      // Only load if not already in memory
+      if (!uploadSessions.has(sessionId)) {
+        const session = {
+          id: row.session_id,
+          contentEntryId: row.content_entry_id,
+          filename: row.filename,
+          originalName: row.original_name,
+          contentType: row.content_type,
+          fileSize: row.file_size,
+          status: row.status,
+          progress: row.progress,
+          error: row.error_message,
+          folderTitle: row.folder_title,
+          folderDescription: row.folder_description,
+          batchId: row.batch_id,
+          partNumber: row.part_number,
+          retryCount: row.retry_count || 0,
+          maxRetries: row.max_retries || MEMORY_CONFIG.RETRY_CONFIG.MAX_ATTEMPTS,
+          isRecoverable: row.is_recoverable !== false,
+          networkErrors: JSON.parse(row.network_errors || '[]'),
+          bunnyVideoId: row.bunny_video_id,
+          bunnyUploadUrl: row.bunny_upload_url,
+          finalUrl: row.final_url,
+          steps: JSON.parse(row.steps || '{}'),
+          metadata: JSON.parse(row.metadata || '{}'),
+          startTime: row.start_time,
+          lastUpdate: row.last_update,
+          lastHeartbeat: row.last_heartbeat,
+          createdAt: row.created_at
+        };
+        
+        uploadSessions.set(sessionId, session);
+        loadedCount++;
+      }
+    }
+    
+    if (loadedCount > 0) {
+      console.log(`📁 Loaded ${loadedCount} sessions from database`);
+    }
+    
+    return loadedCount;
+    
+  } catch (error) {
+    console.error('❌ Failed to load sessions from database:', error);
+    return 0;
+  }
+}
+
+// Start auto-recovery interval
+setInterval(recoverStalledUploads, MEMORY_CONFIG.RETRY_CONFIG.RECOVERY_INTERVAL);
+
+console.log(`🔄 Auto-recovery started: checking every ${MEMORY_CONFIG.RETRY_CONFIG.RECOVERY_INTERVAL / 1000}s`);
+
+// Function to retry failed uploads automatically
+function retryFailedUploads() {
+  const now = Date.now();
+  let retriedCount = 0;
+  
+  for (const [sessionId, session] of uploadSessions.entries()) {
+    if (!session || !session.isRecoverable) continue;
+    
+    const timeSinceLastUpdate = now - new Date(session.lastUpdate).getTime();
+    
+    // Check for stale sessions that might need recovery
+    if (session.status === 'uploading' && timeSinceLastUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD) {
+      console.log(`🔄 Attempting to recover stale session: ${sessionId.slice(0, 12)}...`);
+      session.status = 'pending';
+      session.error = 'Session recovered from stale state';
+      session.lastUpdate = new Date().toISOString();
+      retriedCount++;
+    }
+    
+    // Retry failed sessions that haven't exceeded max retries
+    if (session.status === 'failed' && session.retryCount < session.maxRetries) {
+      const retryDelay = MEMORY_CONFIG.RETRY_DELAY_BASE * Math.pow(2, session.retryCount);
+      const timeSinceFailure = now - new Date(session.lastUpdate).getTime();
+      
+      if (timeSinceFailure > retryDelay) {
+        console.log(`🔄 Retrying failed upload (attempt ${session.retryCount + 1}/${session.maxRetries}): ${sessionId.slice(0, 12)}...`);
+        session.status = 'pending';
+        session.retryCount++;
+        session.lastUpdate = new Date().toISOString();
+        session.error = `Retry attempt ${session.retryCount}`;
+        retriedCount++;
+      }
+    }
+  }
+  
+  if (retriedCount > 0) {
+    console.log(`🔄 Automatic retry: Attempted to recover ${retriedCount} failed/stale uploads`);
+  }
+}
+
+// Function to handle upload errors with automatic retry logic
+function handleUploadError(sessionId, error, isRecoverable = true) {
+  const session = uploadSessions.get(sessionId);
+  if (!session) return false;
+  
+  session.networkErrors.push({
+    error: error.message || error,
+    timestamp: new Date().toISOString(),
+    retryAttempt: session.retryCount
+  });
+  
+  session.lastUpdate = new Date().toISOString();
+  session.failureReason = error.message || error;
+  session.isRecoverable = isRecoverable;
+  
+  if (session.retryCount >= session.maxRetries) {
+    session.status = 'failed';
+    session.error = `Failed after ${session.maxRetries} attempts: ${error.message || error}`;
+    session.isRecoverable = false;
+    console.error(`❌ Upload permanently failed: ${sessionId.slice(0, 12)}... - ${session.error}`);
+    return false;
+  } else {
+    session.status = 'failed';
+    session.error = `Temporary failure (attempt ${session.retryCount}/${session.maxRetries}): ${error.message || error}`;
+    console.warn(`⚠️ Upload failed, will retry: ${sessionId.slice(0, 12)}... - ${session.error}`);
+    return true;
+  }
+}
 
 // Clean up duplicate batch sessions
 function deduplicateBatchSessions() {
@@ -303,21 +575,29 @@ async function createDatabaseEntry(supabase, contentEntry, filename) {
   return finalEntry;
 }
 
-// Helper function to create upload session
-function createUploadSession(sessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber) {
-  return {
+// Enhanced session creation with database persistence
+async function createUploadSessionWithPersistence(sessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber) {
+  const session = {
     id: sessionId,
     contentEntryId: finalEntry.id,
     filename: file.filename,
+    originalName: file.originalName || file.filename,
+    contentType: file.contentType || 'video/mp4',
     fileSize: file.fileSize || 0,
     status: 'pending',
     progress: 0,
     startTime: new Date().toISOString(),
     lastUpdate: new Date().toISOString(),
+    lastHeartbeat: new Date().toISOString(),
     bunnyVideoId: null,
     bunnyUploadUrl: null,
     finalUrl: null,
     error: null,
+    retryCount: 0,
+    maxRetries: MEMORY_CONFIG.RETRY_CONFIG.MAX_ATTEMPTS,
+    isRecoverable: true,
+    failureReason: null,
+    networkErrors: [],
     batchId,
     folderTitle,
     folderDescription,
@@ -326,8 +606,29 @@ function createUploadSession(sessionId, finalEntry, file, batchId, folderTitle, 
       credentials: false,
       bunnyUpload: false,
       databaseUpdate: false
-    }
+    },
+    metadata: {
+      originalFileSize: file.fileSize || 0,
+      uploadStartTime: null,
+      uploadCompleteTime: null,
+      averageSpeed: null,
+      lastProgressUpdate: new Date().toISOString()
+    },
+    createdAt: new Date().toISOString()
   };
+  
+  // Store in memory
+  uploadSessions.set(sessionId, session);
+  
+  // Persist to database immediately
+  try {
+    await persistSessionToDatabase(session);
+    console.log(`✅ Created persistent session: ${sessionId.slice(0, 12)}... (${session.filename})`);
+  } catch (error) {
+    console.warn(`⚠️ Failed to persist session to database: ${sessionId}`, error);
+  }
+  
+  return session;
 }
 
 // Helper function to process single file in batch
@@ -371,7 +672,7 @@ async function processBatchFile(supabase, file, index, batchConfig) {
     throw new Error(`Failed to generate unique session ID after 5 attempts for ${file.filename}`);
   }
   
-  const session = createUploadSession(finalSessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber);
+  const session = await createUploadSessionWithPersistence(finalSessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber);
   
   // Store session in memory
   uploadSessions.set(finalSessionId, session);
@@ -511,12 +812,12 @@ router.post('/start', async (req, res) => {
   }
 });
 
-// POST /api/admin/upload-tracking/update - Update upload progress
+// POST /api/admin/upload-tracking/update - Update upload progress with enhanced error handling
 router.post('/update', async (req, res) => {
   try {
     verifyAdminToken(req);
     
-    const { sessionId, status, progress, step, bunnyVideoId, bunnyUploadUrl, finalUrl, error } = req.body;
+    const { sessionId, status, progress, step, bunnyVideoId, bunnyUploadUrl, finalUrl, error, heartbeat } = req.body;
     
     if (!sessionId) {
       return res.status(400).json({ success: false, error: 'Missing sessionId' });
@@ -527,22 +828,79 @@ router.post('/update', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Upload session not found' });
     }
     
-    // Update session
-    if (status) session.status = status;
-    if (progress !== undefined) session.progress = progress;
+    // Update heartbeat if provided
+    if (heartbeat) {
+      session.lastHeartbeat = new Date().toISOString();
+    }
+    
+    // Update session with enhanced tracking
+    if (status) {
+      const previousStatus = session.status;
+      session.status = status;
+      
+      // Track upload timing
+      if (status === 'uploading' && previousStatus !== 'uploading') {
+        session.metadata.uploadStartTime = new Date().toISOString();
+      }
+      if (status === 'completed' && previousStatus !== 'completed') {
+        session.metadata.uploadCompleteTime = new Date().toISOString();
+        
+        // Calculate average upload speed
+        if (session.metadata.uploadStartTime && session.fileSize > 0) {
+          const uploadDuration = new Date(session.metadata.uploadCompleteTime).getTime() - 
+                                new Date(session.metadata.uploadStartTime).getTime();
+          session.metadata.averageSpeed = Math.round((session.fileSize / 1024 / 1024) / (uploadDuration / 1000)); // MB/s
+        }
+      }
+    }
+    
+    if (progress !== undefined) {
+      session.progress = Math.max(0, Math.min(100, progress)); // Ensure progress is between 0-100
+      session.metadata.lastProgressUpdate = new Date().toISOString();
+    }
+    
     if (step) session.steps[step] = true;
     if (bunnyVideoId) session.bunnyVideoId = bunnyVideoId;
     if (bunnyUploadUrl) session.bunnyUploadUrl = bunnyUploadUrl;
     if (finalUrl) session.finalUrl = finalUrl;
-    if (error) session.error = error;
+    
+    // Handle errors with retry logic
+    if (error) {
+      const willRetry = handleUploadError(sessionId, error, true);
+      if (!willRetry) {
+        return res.status(500).json({
+          success: false,
+          error: session.error,
+          sessionId,
+          retryCount: session.retryCount,
+          maxRetries: session.maxRetries
+        });
+      }
+    } else {
+      // Reset error state on successful update
+      if (session.status !== 'failed') {
+        session.error = null;
+        session.failureReason = null;
+      }
+    }
     
     session.lastUpdate = new Date().toISOString();
     
-    console.log(`📈 Upload session updated: ${sessionId} - ${status || 'progress'} (${progress || 0}%)`);
+    // Persist session changes to database
+    await persistSessionToDatabase(session);
+    
+    console.log(`📈 Upload session updated: ${sessionId.slice(0, 12)}... - ${status || 'progress'} (${progress || session.progress}%) [Retry: ${session.retryCount}/${session.maxRetries}]`);
     
     return res.json({
       success: true,
-      session,
+      session: {
+        ...session,
+        // Include recovery information
+        isRecoverable: session.isRecoverable,
+        retryCount: session.retryCount,
+        maxRetries: session.maxRetries,
+        networkErrors: session.networkErrors.slice(-3) // Only return last 3 errors
+      },
       message: 'Upload session updated'
     });
     
@@ -555,7 +913,7 @@ router.post('/update', async (req, res) => {
   }
 });
 
-// GET /api/admin/upload-tracking/status/:sessionId - Get upload status
+// GET /api/admin/upload-tracking/status/:sessionId - Get upload status with enhanced recovery info
 router.get('/status/:sessionId', async (req, res) => {
   try {
     verifyAdminToken(req);
@@ -567,20 +925,45 @@ router.get('/status/:sessionId', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Upload session not found' });
     }
     
-    // Check if session is stale (older than 2 hours)
+    // Check if session is stale based on heartbeat
     const sessionAge = Date.now() - new Date(session.startTime).getTime();
-    const isStale = sessionAge > 2 * 60 * 60 * 1000; // 2 hours
+    const lastHeartbeatAge = Date.now() - new Date(session.lastHeartbeat || session.lastUpdate).getTime();
+    const isStale = sessionAge > MEMORY_CONFIG.SESSION_TIMEOUT;
+    const isHeartbeatStale = lastHeartbeatAge > MEMORY_CONFIG.STALE_SESSION_THRESHOLD;
     
-    if (isStale && session.status !== 'completed' && session.status !== 'failed') {
+    // Auto-recovery logic
+    if (isHeartbeatStale && session.status === 'uploading' && session.isRecoverable) {
+      console.log(`🔄 Auto-recovering stale session: ${sessionId.slice(0, 12)}...`);
+      session.status = 'pending';
+      session.error = 'Session recovered from stale state - will retry upload';
+      session.lastUpdate = new Date().toISOString();
+    } else if (isStale && session.status !== 'completed' && session.status !== 'failed') {
       session.status = 'stale';
       session.error = 'Session timed out';
+      session.isRecoverable = false;
     }
     
     return res.json({
       success: true,
-      session,
+      session: {
+        ...session,
+        // Enhanced recovery information
+        isRecoverable: session.isRecoverable,
+        retryCount: session.retryCount,
+        maxRetries: session.maxRetries,
+        networkErrors: session.networkErrors?.slice(-3), // Last 3 errors
+        timeSinceLastHeartbeat: lastHeartbeatAge,
+        metadata: session.metadata
+      },
       isStale,
-      sessionAge: Math.round(sessionAge / 1000) // age in seconds
+      isHeartbeatStale,
+      sessionAge: Math.round(sessionAge / 1000), // age in seconds
+      recovery: {
+        canRetry: session.isRecoverable && session.retryCount < session.maxRetries,
+        nextRetryIn: session.status === 'failed' ? 
+          Math.max(0, (MEMORY_CONFIG.RETRY_DELAY_BASE * Math.pow(2, session.retryCount)) - 
+          (Date.now() - new Date(session.lastUpdate).getTime())) : 0
+      }
     });
     
   } catch (error) {
@@ -588,6 +971,60 @@ router.get('/status/:sessionId', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to get upload status'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/heartbeat - Send heartbeat to keep session alive
+router.post('/heartbeat', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId, progress, status } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'Missing sessionId' });
+    }
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Upload session not found' });
+    }
+    
+    // Update heartbeat and optional progress
+    session.lastHeartbeat = new Date().toISOString();
+    session.lastUpdate = new Date().toISOString();
+    
+    if (progress !== undefined) {
+      session.progress = Math.max(0, Math.min(100, progress));
+      session.metadata.lastProgressUpdate = new Date().toISOString();
+    }
+    
+    if (status && status !== session.status) {
+      session.status = status;
+    }
+    
+    // Reset stale status if session was marked as stale
+    if (session.status === 'stale' && session.isRecoverable) {
+      session.status = 'uploading';
+      session.error = null;
+      console.log(`💓 Session recovered via heartbeat: ${sessionId.slice(0, 12)}...`);
+    }
+    
+    return res.json({
+      success: true,
+      sessionId,
+      lastHeartbeat: session.lastHeartbeat,
+      status: session.status,
+      progress: session.progress,
+      message: 'Heartbeat received'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error processing heartbeat:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to process heartbeat'
     });
   }
 });
@@ -777,12 +1214,13 @@ router.post('/start-batch', async (req, res) => {
   }
 });
 
-// GET /api/admin/upload-tracking/batch/:batchId - Get batch upload status
+// GET /api/admin/upload-tracking/batch/:batchId - Get batch upload status with recovery support
 router.get('/batch/:batchId', async (req, res) => {
   try {
     verifyAdminToken(req);
     
     const { batchId } = req.params;
+    const { recover } = req.query; // ?recover=true to attempt recovery
     
     console.log(`🔍 Looking for batch: ${batchId}`);
     console.log(`📊 Total sessions in memory: ${uploadSessions.size}`);
@@ -790,6 +1228,12 @@ router.get('/batch/:batchId', async (req, res) => {
     // Run cleanup and deduplication before looking up sessions
     cleanupStaleSessions();
     deduplicateBatchSessions();
+    
+    // If recovery requested, load from database
+    if (recover === 'true') {
+      console.log(`🔄 Recovery requested for batch ${batchId}`);
+      await loadSessionsFromDatabase();
+    }
     
     // Debug: Log all session batch IDs
     const allSessions = Array.from(uploadSessions.values());
@@ -822,6 +1266,18 @@ router.get('/batch/:batchId', async (req, res) => {
       session.status !== 'completed' && session.status !== 'failed'
     ).length;
     
+    // Recovery analysis
+    const recoverableCount = batchSessions.filter(session => 
+      session.isRecoverable && 
+      session.status === 'failed' && 
+      session.retryCount < session.maxRetries
+    ).length;
+    
+    const staleCount = batchSessions.filter(session => {
+      const timeSinceUpdate = Date.now() - new Date(session.lastUpdate).getTime();
+      return session.status === 'uploading' && timeSinceUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD;
+    }).length;
+    
     return res.json({
       success: true,
       batchId,
@@ -832,10 +1288,22 @@ router.get('/batch/:batchId', async (req, res) => {
       failedCount,
       activeCount,
       totalProgress: Math.round(totalProgress),
-      sessions: batchSessions,
+      sessions: batchSessions.map(session => ({
+        ...session,
+        // Include recovery info for each session
+        canRetry: session.isRecoverable && session.retryCount < session.maxRetries,
+        timeSinceLastUpdate: Date.now() - new Date(session.lastUpdate).getTime(),
+        networkErrors: session.networkErrors?.slice(-2) // Last 2 errors only
+      })),
       memoryStats: {
         totalSessions: uploadSessions.size,
         uniqueBatches: uniqueBatchSet.size
+      },
+      recovery: {
+        recoverableCount,
+        staleCount,
+        canRecover: recoverableCount > 0 || staleCount > 0,
+        recoveryEndpoint: `/api/admin/upload-tracking/recover-batch/${batchId}`
       }
     });
     
@@ -844,6 +1312,86 @@ router.get('/batch/:batchId', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to get batch status'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/recover-batch/:batchId - Recover specific batch
+router.post('/recover-batch/:batchId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { batchId } = req.params;
+    
+    console.log(`🔄 Recovering batch: ${batchId}`);
+    
+    // Load sessions from database
+    await loadSessionsFromDatabase();
+    
+    // Get batch sessions
+    const allSessions = Array.from(uploadSessions.values());
+    const batchSessions = allSessions.filter(session => session.batchId === batchId);
+    
+    if (batchSessions.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Batch not found for recovery'
+      });
+    }
+    
+    let recoveredCount = 0;
+    let errorCount = 0;
+    
+    // Attempt to recover failed/stale sessions
+    for (const session of batchSessions) {
+      const timeSinceUpdate = Date.now() - new Date(session.lastUpdate).getTime();
+      
+      if (session.status === 'failed' && session.isRecoverable && session.retryCount < session.maxRetries) {
+        session.status = 'pending';
+        session.error = `Recovered from failure (attempt ${session.retryCount + 1})`;
+        session.lastUpdate = new Date().toISOString();
+        await persistSessionToDatabase(session);
+        recoveredCount++;
+        console.log(`🔄 Recovered failed session: ${session.id.slice(0, 12)}...`);
+      } else if (session.status === 'uploading' && timeSinceUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD) {
+        session.status = 'pending';
+        session.error = 'Recovered from stale state';
+        session.lastUpdate = new Date().toISOString();
+        await persistSessionToDatabase(session);
+        recoveredCount++;
+        console.log(`🔄 Recovered stale session: ${session.id.slice(0, 12)}...`);
+      } else if (!session.isRecoverable || session.retryCount >= session.maxRetries) {
+        errorCount++;
+      }
+    }
+    
+    const totalProgress = batchSessions.reduce((sum, session) => sum + session.progress, 0) / batchSessions.length;
+    const completedCount = batchSessions.filter(session => session.status === 'completed').length;
+    const activeCount = batchSessions.filter(session => 
+      session.status !== 'completed' && session.status !== 'failed'
+    ).length;
+    
+    return res.json({
+      success: true,
+      message: `Batch recovery completed: ${recoveredCount} sessions recovered`,
+      batchId,
+      recovery: {
+        sessionsRecovered: recoveredCount,
+        unrecoverableErrors: errorCount,
+        totalSessions: batchSessions.length
+      },
+      status: {
+        completedCount,
+        activeCount,
+        totalProgress: Math.round(totalProgress)
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error recovering batch:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to recover batch'
     });
   }
 });
@@ -1138,6 +1686,66 @@ router.get('/credentials/:sessionId', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to process credentials request'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/recover - Manually recover failed uploads
+router.post('/recover', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    console.log('🔄 Manual recovery requested');
+    
+    // Load sessions from database that might need recovery
+    const loadedCount = await loadSessionsFromDatabase();
+    
+    // Run retry logic for failed uploads
+    retryFailedUploads();
+    
+    const allSessions = Array.from(uploadSessions.values());
+    const recoverableSessions = allSessions.filter(s => 
+      s.isRecoverable && 
+      (s.status === 'failed' || s.status === 'pending') && 
+      s.retryCount < s.maxRetries
+    );
+    
+    const staleSessions = allSessions.filter(s => {
+      const timeSinceLastUpdate = Date.now() - new Date(s.lastUpdate).getTime();
+      return s.status === 'uploading' && timeSinceLastUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD;
+    });
+    
+    return res.json({
+      success: true,
+      message: `Recovery completed: ${loadedCount} sessions loaded from database`,
+      recovery: {
+        sessionsLoaded: loadedCount,
+        recoverableSessions: recoverableSessions.length,
+        staleSessions: staleSessions.length,
+        totalSessions: uploadSessions.size
+      },
+      sessions: {
+        recoverable: recoverableSessions.map(s => ({
+          id: s.id.slice(0, 12) + '...',
+          filename: s.filename,
+          status: s.status,
+          retryCount: s.retryCount,
+          progress: s.progress
+        })),
+        stale: staleSessions.map(s => ({
+          id: s.id.slice(0, 12) + '...',
+          filename: s.filename,
+          status: s.status,
+          timeSinceUpdate: Math.round((Date.now() - new Date(s.lastUpdate).getTime()) / 1000)
+        }))
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error during manual recovery:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to perform recovery'
     });
   }
 });
