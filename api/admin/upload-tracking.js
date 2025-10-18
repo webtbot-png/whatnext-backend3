@@ -1530,11 +1530,24 @@ async function updateDatabaseWithFinalUrl(session, finalUrl) {
   console.log(`💾 Updating database with final URL: ${finalUrl}`);
   const supabase = getSupabaseAdminClient();
   
+  // Generate thumbnail and preview URLs if it's an iframe video URL
+  let updateData = { media_url: finalUrl };
+  
+  if (finalUrl.includes('iframe.mediadelivery.net')) {
+    // Extract video ID from iframe URL
+    const iframeRegex = /iframe\.mediadelivery\.net\/play\/\d+\/([a-f0-9-]+)/i;
+    const match = finalUrl.match(iframeRegex);
+    
+    if (match) {
+      const videoId = match[1];
+      updateData.thumbnail_url = generateThumbnailUrl(videoId);
+      console.log(`🖼️ Adding thumbnail URL: ${updateData.thumbnail_url}`);
+    }
+  }
+  
   const { error: updateError } = await supabase
     .from('content_entries')
-    .update({ 
-      media_url: finalUrl
-    })
+    .update(updateData)
     .eq('id', session.contentEntryId)
     .select()
     .single();
@@ -1614,8 +1627,14 @@ function markSessionAsCompleted(session, sessionId, bunnyVideoId, finalUrl) {
 // Helper function to handle upload completion with database update
 async function handleUploadCompletionWithDatabase(session, sessionId, bunnyVideoId, finalUrl) {
   try {
-    await updateDatabaseWithFinalUrl(session, finalUrl);
-    markSessionAsCompleted(session, sessionId, bunnyVideoId, finalUrl);
+    // Convert the final URL to iframe format if it's a video
+    const iframeUrl = convertToIframeUrl(finalUrl, bunnyVideoId);
+    console.log(`🔄 Converting URL format:`);
+    console.log(`   Original: ${finalUrl}`);
+    console.log(`   Iframe: ${iframeUrl}`);
+    
+    await updateDatabaseWithFinalUrl(session, iframeUrl);
+    markSessionAsCompleted(session, sessionId, bunnyVideoId, iframeUrl);
     
     return {
       success: true,
@@ -2084,8 +2103,8 @@ function generateBunnyVideoId(title) {
 // Helper function to convert video URLs to working iframe format
 function convertToWorkingVideoUrl(url) {
   try {
-    // Extract video ID from various URL formats
-    const videoId = generateBunnyVideoId(url);
+    // Extract video ID from existing URL
+    let videoId = extractVideoIdFromUrl(url);
     
     // Convert to working iframe.mediadelivery.net format
     return `https://iframe.mediadelivery.net/play/506378/${videoId}`;
@@ -2093,6 +2112,31 @@ function convertToWorkingVideoUrl(url) {
     console.error('❌ Error converting video URL:', error);
     return url; // Return original if conversion fails
   }
+}
+
+// Helper function to extract video ID from various URL formats
+function extractVideoIdFromUrl(url) {
+  if (!url) return 'default-video-id';
+  
+  // Extract from various Bunny CDN URL formats:
+  // https://vz-66586ad3-850.b-cdn.net/58b7eaf4-3c13-4f3f-bef6-cc093c4510c1/play_720p.mp4
+  // https://vz-66586ad3-850.b-cdn.net/58b7eaf4-3c13-4f3f-bef6-cc093c4510c1/playlist.m3u8
+  const bunnyRegex = /vz-[\w-]+\.b-cdn\.net\/([a-f0-9-]{36})/i;
+  const match = url.match(bunnyRegex);
+  
+  if (match) {
+    return match[1]; // Return the UUID part
+  }
+  
+  // If already iframe format, extract the ID
+  const iframeRegex = /iframe\.mediadelivery\.net\/play\/\d+\/([a-f0-9-]+)/i;
+  const iframeMatch = url.match(iframeRegex);
+  if (iframeMatch) {
+    return iframeMatch[1];
+  }
+  
+  console.warn('⚠️ Could not extract video ID from URL:', url);
+  return 'default-video-id';
 }
 
 // Helper function to generate thumbnail URL
@@ -2103,6 +2147,25 @@ function generateThumbnailUrl(videoId) {
 // Helper function to generate preview image URL  
 function generatePreviewUrl(videoId) {
   return `https://vz-66586ad3-850.b-cdn.net/${videoId}/preview.webp?v=1760897608`;
+}
+
+// Helper function to convert any video URL to iframe format for upload completion
+function convertToIframeUrl(originalUrl, bunnyVideoId) {
+  // If bunnyVideoId is provided, use it directly
+  if (bunnyVideoId) {
+    console.log(`✅ Using provided bunnyVideoId: ${bunnyVideoId}`);
+    return `https://iframe.mediadelivery.net/play/506378/${bunnyVideoId}`;
+  }
+  
+  // Otherwise try to extract from the URL
+  const extractedId = extractVideoIdFromUrl(originalUrl);
+  if (extractedId && extractedId !== 'default-video-id') {
+    console.log(`✅ Extracted video ID from URL: ${extractedId}`);
+    return `https://iframe.mediadelivery.net/play/506378/${extractedId}`;
+  }
+  
+  console.warn('⚠️ Could not determine video ID, keeping original URL:', originalUrl);
+  return originalUrl;
 }
 
 // POST /api/admin/upload-tracking/fix-video-urls - Convert HLS URLs back to working MP4 format
