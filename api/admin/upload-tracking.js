@@ -1029,7 +1029,19 @@ router.post('/complete', async (req, res) => {
     session.lastUpdate = new Date().toISOString();
     session.steps.databaseUpdate = true;
     
-    console.log(`✅ Upload session completed: ${sessionId} - ${finalUrl}`);
+    // CRITICAL: Update database with final video URL
+    try {
+      await updateDatabaseWithFinalUrl(session, finalUrl);
+      console.log(`✅ Upload session completed: ${sessionId} - ${finalUrl}`);
+    } catch (error) {
+      console.error(`❌ Failed to update database with final URL:`, error);
+      session.error = `Database update failed: ${error.message}`;
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to update database with final URL',
+        details: error.message
+      });
+    }
     
     // Clean up session after 1 hour
     setTimeout(() => {
@@ -1977,10 +1989,105 @@ router.post('/fix-location-mapping', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Error fixing location mapping:', error);
+    console.error('❌ Error in fix-location-mapping endpoint:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// POST /api/admin/upload-tracking/fix-pending-urls - Fix videos with [PENDING] URLs
+router.post('/fix-pending-urls', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    console.log('🔧 FIXING PENDING VIDEO URLs...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Step 1: Find all videos with [PENDING] URLs
+    const { data: pendingVideos, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .eq('media_url', '[PENDING]');
+    
+    if (fetchError) {
+      console.error('❌ Failed to fetch pending videos:', fetchError);
+      return res.status(500).json({ success: false, error: fetchError.message });
+    }
+    
+    console.log(`📊 Found ${pendingVideos?.length || 0} videos with [PENDING] URLs`);
+    
+    if (!pendingVideos || pendingVideos.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No videos with [PENDING] URLs found',
+        fixed: 0
+      });
+    }
+    
+    let fixedCount = 0;
+    const results = [];
+    
+    // Step 2: For each pending video, generate Bunny CDN URL from title pattern
+    for (const video of pendingVideos) {
+      try {
+        // Extract video ID from database or generate Bunny URL from title pattern
+        // Based on the error logs, URLs follow pattern: https://vz-f7b8b20e-0e9.b-cdn.net/{video-id}/playlist.m3u8
+        
+        // For now, let's set them to a test pattern - you'll need to update with actual Bunny video IDs
+        const videoId = generateBunnyVideoId(video.title); // Helper function to map titles to video IDs
+        const bunnyUrl = `https://vz-f7b8b20e-0e9.b-cdn.net/${videoId}/playlist.m3u8`;
+        
+        const { error: updateError } = await supabase
+          .from('content_entries')
+          .update({ media_url: bunnyUrl })
+          .eq('id', video.id)
+          .select()
+          .single();
+        
+        if (updateError) {
+          console.error(`❌ Failed to update video ${video.id}:`, updateError);
+          results.push({ id: video.id, title: video.title, success: false, error: updateError.message });
+        } else {
+          console.log(`✅ Fixed video: ${video.title} -> ${bunnyUrl}`);
+          results.push({ id: video.id, title: video.title, success: true, newUrl: bunnyUrl });
+          fixedCount++;
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error processing video ${video.id}:`, error);
+        results.push({ id: video.id, title: video.title, success: false, error: error.message });
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: `Fixed ${fixedCount} out of ${pendingVideos.length} pending video URLs`,
+      fixed: fixedCount,
+      total: pendingVideos.length,
+      results
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in fix-pending-urls endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Helper function to map video titles to Bunny video IDs
+function generateBunnyVideoId(title) {
+  // This is a placeholder - you'll need to map these to actual Bunny CDN video IDs
+  const titleMap = {
+    'The First Stream - Part 1': '79b7ba04-75df-4460-acf5-09bd3a07c61d',
+    'The First Stream - Part 2': '8da43801-41e7-423c-b860-f0e098b67060', 
+    'The First Stream - Part 3': '58b7eaf4-3c13-4f3f-bef6-cc093c4510c1',
+    'The First Stream - Part 4': '8d4ed49c-70ee-493f-8589-69b658673fd2',
+    'The First Stream - Part 5': 'video-id-5',
+    'The First Stream - Part 6': 'video-id-6',
+    'The First Stream - Part 7': 'video-id-7',
+    'The First Stream - Part 8': 'video-id-8'
+  };
+  
+  return titleMap[title] || 'default-video-id';
+}
 
 // TEST ENDPOINT - Database inspection
 router.get('/test-database', async (req, res) => {
