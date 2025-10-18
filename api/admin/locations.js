@@ -1,222 +1,88 @@
 const express = require('express');
-const { getSupabaseAdminClient } = require('../database.js');
+const { getSupabaseAdminClient  } = require('../../database.js');
+const jwt = require('jsonwebtoken');
 
 const router = express.Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'whatnext-jwt-secret-2025';
 
-// Helper function to log content entries by location
-function logContentByLocation(contentEntries, dbLocations) {
-  if (!contentEntries || contentEntries.length === 0) return;
-  
-  console.log('\n=== CONTENT ENTRIES BY LOCATION ===');
-  const contentByLocation = {};
-  
-  for (const content of contentEntries) {
-    const locId = content.location_id;
-    if (!contentByLocation[locId]) {
-      const location = dbLocations.find(l => l.id === locId);
-      contentByLocation[locId] = {
-        locationName: location?.name || 'Unknown',
-        countryISO3: location?.country_iso3 || 'Unknown',
-        videos: []
-      };
-    }
-    contentByLocation[locId].videos.push({
-      title: content.title,
-      url: content.media_url,
-      status: content.status
-    });
+function verifyAdminToken(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new Error('Unauthorized');
   }
-  
-  for (const [, data] of Object.entries(contentByLocation)) {
-    console.log(`📍 ${data.locationName} (${data.countryISO3}):`);
-    for (const [i, video] of data.videos.entries()) {
-      console.log(`   ${i+1}. "${video.title}" - ${video.status}`);
-      console.log(`      URL: ${video.url?.substring(0, 60)}...`);
-    }
-  }
+  const token = authHeader.substring(7);
+  jwt.verify(token, JWT_SECRET);
 }
 
-// Helper function to format media data from content entries - organized by folders/batches
-function formatMediaData(locationContent) {
-  // Group content by batch_id (folders)
-  const batchGroups = {};
-  
-  for (const content of locationContent) {
-    const batchId = content.batch_id;
-    
-    if (!batchGroups[batchId]) {
-      batchGroups[batchId] = {
-        id: batchId || 'individual-' + content.id,
-        type: 'folder',
-        title: extractFolderName(content.title) || 'Untitled Folder',
-        description: content.description?.split(' - Part ')[0] || 'Video collection',
-        thumbnail: content.thumbnail_url || '', // Use first video's thumbnail as folder thumbnail
-        isFeatured: false,
-        createdAt: content.created_at,
-        videoCount: 0,
-        totalDuration: 0,
-        videos: []
-      };
-    }
-    
-    // Add video to the batch/folder
-    batchGroups[batchId].videos.push({
-      id: content.id,
-      type: content.content_type || 'video',
-      url: content.media_url || '',
-      title: content.title || 'Untitled',
-      description: content.description || '',
-      thumbnail: content.thumbnail_url || '',
-      duration: content.duration || 0,
-      isFeatured: content.is_featured || false,
-      viewCount: content.view_count || 0,
-      tags: content.tags || [],
-      createdAt: content.created_at,
-      partNumber: extractPartNumber(content.title)
-    });
-    
-    batchGroups[batchId].videoCount++;
-    batchGroups[batchId].totalDuration += Number.parseInt(content.duration || 0);
-    
-    // Use the first video's thumbnail as folder thumbnail if not set
-    if (!batchGroups[batchId].thumbnail && content.thumbnail_url) {
-      batchGroups[batchId].thumbnail = content.thumbnail_url;
-    }
-  }
-  
-  // Convert to array and sort videos within each folder by part number
-  const folders = Object.values(batchGroups);
-  for (const folder of folders) {
-    folder.videos.sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
-  }
-  
-  return folders;
-}
+// GET /api/admin/locations
+router.get('/', (req, res) => {
+  console.log('🔍 Admin locations API - returning world countries for autocomplete');
+  // This endpoint now serves world countries for location autocomplete, not hardcoded locations
+  // The world countries data comes from world-atlas package via the frontend
+  console.log('✅ Admin locations endpoint active - world countries will be loaded by frontend');
+  res.json({
+    message: 'Admin locations endpoint active - use world countries autocomplete',
+    info: 'World countries loaded via @types/world-atlas package on frontend'
+  });
+});
 
-// Helper function to extract folder name from video title (e.g., "The First Stream - Part 1" -> "The First Stream")
-function extractFolderName(title) {
-  if (!title) return null;
-  const match = title.match(/^(.+?)\s*-\s*Part\s+\d+/i);
-  return match ? match[1].trim() : title;
-}
-
-// Helper function to extract part number from video title
-function extractPartNumber(title) {
-  if (!title) return 0;
-  const match = title.match(/Part\s+(\d+)/i);
-  return match ? Number.parseInt(match[1]) : 0;
-}
-
-// Helper function to format location object
-function formatLocationObject(loc, media) {
-  return {
-    id: loc.id,
-    name: loc.name,
-    countryISO3: loc.country_iso3 || loc.countryISO3 || 'UNKNOWN',
-    coordinates: [Number.parseFloat(loc.lng), Number.parseFloat(loc.lat)],
-    lat: Number.parseFloat(loc.lat),
-    lng: Number.parseFloat(loc.lng),
-    description: loc.description || `Location in ${loc.name}`,
-    status: loc.status || 'active',
-    summary: loc.summary || loc.description,
-    tags: loc.tags || [],
-    slug: loc.slug || (loc.name ? loc.name.toLowerCase().replaceAll(/\s+/g, '-') : undefined),
-    visitedDate: loc.visited_date || (loc.created_at ? loc.created_at.split('T')[0] : undefined),
-    viewCount: loc.view_count || 0,
-    isFeatured: loc.is_featured || false,
-    mediaCount: media.length,
-    media: media
-  };
-}
-
-// GET /api/locations - Main locations endpoint for the map
-router.get('/', async (req, res) => {
-  console.log('📍 LOCATIONS API: Fetching locations with content for map display');
-  
+// POST /api/admin/locations
+router.post('/', async (req, res) => {
   try {
+    verifyAdminToken(req);
+    const { name, country, country_iso3, lat, lng, status, summary, description, tags, slug } = req.body;
+    if (!name || !lat || !lng) {
+      return res.status(400).json({ success: false, error: 'Name, latitude, and longitude are required' });
+    }
     const supabase = getSupabaseAdminClient();
-    
-    // Get all locations from database
-    const { data: dbLocations, error } = await supabase
+    // Check if location already exists
+    const { data: existing } = await supabase
       .from('locations')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
-    console.log(`📍 Found ${dbLocations?.length || 0} total locations in database`);
-    
-    if (error) {
-      console.error('❌ Database error:', error);
-      return res.json({ success: true, locations: [] });
+      .select('id, name')
+      .eq('name', name)
+      .single();
+    if (existing) {
+      console.log(`📍 Location ${name} already exists, returning existing ID: ${existing.id}`);
+      return res.json({ success: true, location: existing, message: `Location ${name} already exists` });
     }
-    
-    if (!dbLocations || dbLocations.length === 0) {
-      console.log('📍 No locations in database');
-      return res.json({ success: true, locations: [] });
-    }
-    
-    // Get content entries for locations - ANY STATUS with valid media
-    const { data: contentEntries, error: contentError } = await supabase
-      .from('content_entries')
-      .select('*')
-      .not('location_id', 'is', null)
-      .neq('media_url', '[PENDING]')  // Exclude pending uploads
-      .not('media_url', 'is', null)  // Exclude null media URLs
-      .order('created_at', { ascending: true });  // FIXED: oldest first
-    
-    if (contentError) {
-      console.error('❌ Content error:', contentError);
-    }
-    
-    console.log(`📄 Found ${contentEntries?.length || 0} content entries with valid media (any status)`);
-    
-    // Log content entries by location for debugging
-    logContentByLocation(contentEntries, dbLocations);
-    
-    // Only return locations that have content with valid media
-    const locations = dbLocations
-      .map((loc) => {
-        // Filter content entries that belong to this specific location
-        const locationContent = (contentEntries || []).filter(
-          (content) => content.location_id === loc.id
-        );
-        
-        // Skip locations without any content with valid media
-        if (!locationContent || locationContent.length === 0) {
-          console.log(`⚠️ Skipping "${loc.name}" (${loc.country_iso3}) - no content with valid media`);
-          return null;
-        }
-        
-        console.log(`✅ Including "${loc.name}" (${loc.country_iso3}) with ${locationContent.length} video(s)`);
-        
-        // Format media data using helper function
-        const media = formatMediaData(locationContent);
-        
-        // Return formatted location object
-        return formatLocationObject(loc, media);
+    console.log('📍 Creating location with data:', {
+      name,
+      country: country || name,
+      country_iso3: country_iso3 || '',
+      lat: Number.parseFloat(lat),
+      lng: Number.parseFloat(lng)
+    });
+    // Create new location
+    const { data: location, error } = await supabase
+      .from('locations')
+      .insert({
+        name,
+        country: country || name,
+        country_iso3: country_iso3 || '',
+        lat: Number.parseFloat(lat),
+        lng: Number.parseFloat(lng),
+        status: status || 'planned',
+        summary: summary || `${name} location`,
+        description: description || `Location entry for ${name}`,
+        tags: tags || ['country'],
+        slug: slug || name.toLowerCase().replaceAll(/[^a-z0-9]+/g, '-')
       })
-      .filter(Boolean); // Remove nulls
-    
-    console.log('\n=== FINAL LOCATIONS BEING SENT TO MAP ===');
-    for (const [i, l] of locations.entries()) {
-      console.log(`${i+1}. "${l.name}" (${l.countryISO3}) - [${l.lng}, ${l.lat}] - ${l.mediaCount} videos`);
+      .select()
+      .single();
+    if (error) {
+      console.error('Error creating location:', error);
+      throw error;
     }
-    
-    return res.json({ 
-      success: true, 
-      locations: locations,
-      total: locations.length,
-      timestamp: new Date().toISOString()
-    });
-    
-  } catch (err) {
-    console.error('💥 Locations API Error:', err);
-    return res.json({ 
-      success: true, 
-      locations: [],
-      error: 'Failed to fetch locations',
-      timestamp: new Date().toISOString()
-    });
+    console.log(`✅ Created new location: ${name} (ID: ${location.id})`);
+    return res.status(201).json({ success: true, location, message: `Location ${name} created successfully` });
+  } catch (error) {
+    console.error('Error in POST /admin/locations:', error);
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(500).json({ success: false, error: 'Failed to create location' });
   }
 });
 
 module.exports = router;
+
