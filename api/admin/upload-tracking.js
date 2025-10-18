@@ -2089,6 +2089,80 @@ function generateBunnyVideoId(title) {
   return titleMap[title] || 'default-video-id';
 }
 
+// POST /api/admin/upload-tracking/debug-video-urls - Test video URL accessibility  
+router.post('/debug-video-urls', async (req, res) => {
+  try {
+    // verifyAdminToken(req); // Temporarily disabled for debugging
+    console.log('🔍 DEBUGGING VIDEO URL ACCESS...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Get all videos with their URLs
+    const { data: videos, error } = await supabase
+      .from('content_entries')
+      .select('id, title, media_url')
+      .eq('content_type', 'video')
+      .limit(5); // Test first 5 videos
+    
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    
+    const results = [];
+    
+    for (const video of videos) {
+      try {
+        console.log(`🔍 Testing: ${video.title} - ${video.media_url}`);
+        
+        // Test URL accessibility
+        const response = await fetch(video.media_url, {
+          method: 'HEAD', // Just check headers, don't download content
+          headers: {
+            'User-Agent': 'WhatNext-Backend/1.0'
+          }
+        });
+        
+        results.push({
+          id: video.id,
+          title: video.title,
+          url: video.media_url,
+          status: response.status,
+          statusText: response.statusText,
+          accessible: response.ok,
+          headers: Object.fromEntries(response.headers.entries())
+        });
+        
+        console.log(`${response.ok ? '✅' : '❌'} ${video.title}: ${response.status} ${response.statusText}`);
+        
+      } catch (error) {
+        results.push({
+          id: video.id,
+          title: video.title,
+          url: video.media_url,
+          accessible: false,
+          error: error.message
+        });
+        console.error(`❌ ${video.title}: ${error.message}`);
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: `Tested ${results.length} video URLs`,
+      results,
+      summary: {
+        total: results.length,
+        accessible: results.filter(r => r.accessible).length,
+        blocked: results.filter(r => !r.accessible).length
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in debug-video-urls endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // TEST ENDPOINT - Database inspection
 router.get('/test-database', async (req, res) => {
   try {
