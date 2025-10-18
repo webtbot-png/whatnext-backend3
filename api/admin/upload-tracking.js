@@ -8,7 +8,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-t
 // In-memory upload tracking (in production, use Redis or database)
 const uploadSessions = new Map();
 
-console.log('🔥 UPLOAD-TRACKING ROUTER LOADED - BATCH ENDPOINT AVAILABLE');
+console.log('🔥 UPLOAD-TRACKING ROUTER LOADED - BATCH ENDPOINT AVAILABLE'); 
 console.log('📋 Available endpoints: start, update, status, complete, active, start-batch, batch/:id, credentials/:sessionId, upload-complete');
 
 // Helper function to verify admin token
