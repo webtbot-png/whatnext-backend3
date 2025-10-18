@@ -833,55 +833,26 @@ router.post('/update', async (req, res) => {
       session.lastHeartbeat = new Date().toISOString();
     }
     
-    // Update session with enhanced tracking
+    // Update session status with timing tracking
     if (status) {
-      const previousStatus = session.status;
-      session.status = status;
-      
-      // Track upload timing
-      if (status === 'uploading' && previousStatus !== 'uploading') {
-        session.metadata.uploadStartTime = new Date().toISOString();
-      }
-      if (status === 'completed' && previousStatus !== 'completed') {
-        session.metadata.uploadCompleteTime = new Date().toISOString();
-        
-        // Calculate average upload speed
-        if (session.metadata.uploadStartTime && session.fileSize > 0) {
-          const uploadDuration = new Date(session.metadata.uploadCompleteTime).getTime() - 
-                                new Date(session.metadata.uploadStartTime).getTime();
-          session.metadata.averageSpeed = Math.round((session.fileSize / 1024 / 1024) / (uploadDuration / 1000)); // MB/s
-        }
-      }
+      updateSessionStatus(session, status);
     }
     
+    // Update progress if provided
     if (progress !== undefined) {
-      session.progress = Math.max(0, Math.min(100, progress)); // Ensure progress is between 0-100
-      session.metadata.lastProgressUpdate = new Date().toISOString();
+      updateSessionProgress(session, progress);
     }
     
-    if (step) session.steps[step] = true;
-    if (bunnyVideoId) session.bunnyVideoId = bunnyVideoId;
-    if (bunnyUploadUrl) session.bunnyUploadUrl = bunnyUploadUrl;
-    if (finalUrl) session.finalUrl = finalUrl;
+    // Update session fields
+    updateSessionFields(session, step, bunnyVideoId, bunnyUploadUrl, finalUrl);
     
     // Handle errors with retry logic
     if (error) {
-      const willRetry = handleUploadError(sessionId, error, true);
-      if (!willRetry) {
-        return res.status(500).json({
-          success: false,
-          error: session.error,
-          sessionId,
-          retryCount: session.retryCount,
-          maxRetries: session.maxRetries
-        });
-      }
-    } else {
+      const errorResponse = handleSessionError(session, sessionId, error, res);
+      if (errorResponse) return errorResponse;
+    } else if (session.status !== 'failed') {
       // Reset error state on successful update
-      if (session.status !== 'failed') {
-        session.error = null;
-        session.failureReason = null;
-      }
+      resetSessionErrorState(session);
     }
     
     session.lastUpdate = new Date().toISOString();
@@ -891,18 +862,7 @@ router.post('/update', async (req, res) => {
     
     console.log(`📈 Upload session updated: ${sessionId.slice(0, 12)}... - ${status || 'progress'} (${progress || session.progress}%) [Retry: ${session.retryCount}/${session.maxRetries}]`);
     
-    return res.json({
-      success: true,
-      session: {
-        ...session,
-        // Include recovery information
-        isRecoverable: session.isRecoverable,
-        retryCount: session.retryCount,
-        maxRetries: session.maxRetries,
-        networkErrors: session.networkErrors.slice(-3) // Only return last 3 errors
-      },
-      message: 'Upload session updated'
-    });
+    return res.json(createSessionResponse(session));
     
   } catch (error) {
     console.error('❌ Error updating upload session:', error);
@@ -1080,6 +1040,48 @@ router.post('/complete', async (req, res) => {
   }
 });
 
+// Helper function to group sessions by batch
+function groupSessionsByBatch(activeSessions) {
+  const batchGroups = {};
+  const singleSessions = [];
+  
+  for (const session of activeSessions) {
+    if (session.batchId) {
+      if (!batchGroups[session.batchId]) {
+        batchGroups[session.batchId] = [];
+      }
+      batchGroups[session.batchId].push(session);
+    } else {
+      singleSessions.push(session);
+    }
+  }
+  
+  return { batchGroups, singleSessions };
+}
+
+// Helper function to calculate memory statistics
+function calculateMemoryStats(allSessions, activeSessions, batchGroups) {
+  return {
+    totalSessions: uploadSessions.size,
+    activeSessions: activeSessions.length,
+    uniqueBatches: Object.keys(batchGroups).length,
+    statusBreakdown: {
+      pending: allSessions.filter(s => s.status === 'pending').length,
+      uploading: allSessions.filter(s => s.status === 'uploading').length,
+      completed: allSessions.filter(s => s.status === 'completed').length,
+      failed: allSessions.filter(s => s.status === 'failed').length,
+      stale: allSessions.filter(s => s.status === 'stale').length
+    }
+  };
+}
+
+// Helper function to filter active sessions
+function getActiveSessionsFiltered(allSessions) {
+  return allSessions
+    .filter(session => session.status !== 'completed' && session.status !== 'failed')
+    .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+}
+
 // GET /api/admin/upload-tracking/active - Get all active upload sessions
 router.get('/active', async (req, res) => {
   try {
@@ -1092,39 +1094,15 @@ router.get('/active', async (req, res) => {
     deduplicateBatchSessions();
     
     const allSessions = Array.from(uploadSessions.values());
-    const activeSessions = allSessions
-      .filter(session => session.status !== 'completed' && session.status !== 'failed')
-      .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+    const activeSessions = getActiveSessionsFiltered(allSessions);
     
     console.log(`✅ Found ${activeSessions.length} active sessions (after cleanup)`);
     
-    // Group by batch for better organization
-    const batchGroups = {};
-    const singleSessions = [];
+    // Group sessions by batch
+    const { batchGroups, singleSessions } = groupSessionsByBatch(activeSessions);
     
-    for (const session of activeSessions) {
-      if (session.batchId) {
-        if (!batchGroups[session.batchId]) {
-          batchGroups[session.batchId] = [];
-        }
-        batchGroups[session.batchId].push(session);
-      } else {
-        singleSessions.push(session);
-      }
-    }
-    
-    const memoryStats = {
-      totalSessions: uploadSessions.size,
-      activeSessions: activeSessions.length,
-      uniqueBatches: Object.keys(batchGroups).length,
-      statusBreakdown: {
-        pending: allSessions.filter(s => s.status === 'pending').length,
-        uploading: allSessions.filter(s => s.status === 'uploading').length,
-        completed: allSessions.filter(s => s.status === 'completed').length,
-        failed: allSessions.filter(s => s.status === 'failed').length,
-        stale: allSessions.filter(s => s.status === 'stale').length
-      }
-    };
+    // Calculate memory statistics
+    const memoryStats = calculateMemoryStats(allSessions, activeSessions, batchGroups);
     
     return res.json({
       success: true,
@@ -1147,51 +1125,73 @@ router.get('/active', async (req, res) => {
   }
 });
 
+// Helper function to handle batch initialization
+async function initializeBatchUpload(req) {
+  console.log('🔑 Verifying admin token...');
+  verifyAdminToken(req);
+  console.log('✅ Token verified successfully');
+  
+  // Validate request
+  const { folderTitle, files } = validateBatchRequest(req);
+  const { folderDescription, contentMetadata } = req.body;
+  
+  console.log('📁 Folder Title:', folderTitle);
+  console.log('📄 Files count:', files?.length);
+  console.log('📋 Content Metadata:', contentMetadata);
+  
+  // Generate batch ID and initialize session tracking
+  const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+  const sessionIds = [];
+  
+  console.log('🆔 Generated batch ID:', batchId);
+  
+  return {
+    folderTitle,
+    folderDescription, 
+    contentMetadata,
+    batchId,
+    sessionIds,
+    files
+  };
+}
+
+// Helper function to process batch files with database operations
+async function processBatchWithDatabase(batchData) {
+  console.log('🔌 Getting Supabase client...');
+  const supabase = getSupabaseAdminClient();
+  console.log('✅ Supabase client obtained');
+  
+  // Create batch configuration object
+  const batchConfig = {
+    folderTitle: batchData.folderTitle,
+    folderDescription: batchData.folderDescription,
+    contentMetadata: batchData.contentMetadata,
+    batchId: batchData.batchId,
+    sessionIds: batchData.sessionIds
+  };
+  
+  // Process all files in the batch
+  await processBatchFiles(supabase, batchData.files, batchConfig);
+  
+  // Create and send response
+  const response = createBatchResponse(batchData.batchId, batchData.sessionIds, batchData.folderTitle, batchData.files);
+  console.log(`📤 Sending response with ${response.createdSessions.length} created sessions`);
+  
+  return response;
+}
+
 // POST /api/admin/upload-tracking/start-batch - Start a batch upload session
 router.post('/start-batch', async (req, res) => {
   console.log('🔥 BATCH UPLOAD ENDPOINT HIT!');
   console.log('📋 Request body:', JSON.stringify(req.body, null, 2));
   
   try {
-    console.log('🔑 Verifying admin token...');
-    verifyAdminToken(req);
-    console.log('✅ Token verified successfully');
-    
-    // Validate request
-    const { folderTitle, files } = validateBatchRequest(req);
-    const { folderDescription, contentMetadata } = req.body;
-    
-    console.log('📁 Folder Title:', folderTitle);
-    console.log('📄 Files count:', files?.length);
-    console.log('📋 Content Metadata:', contentMetadata);
-    
-    // Generate batch ID and initialize session tracking
-    const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2)}`;
-    const sessionIds = [];
-    
-    console.log('🆔 Generated batch ID:', batchId);
+    // Initialize batch upload and validate request
+    const batchData = await initializeBatchUpload(req);
     
     try {
-      console.log('🔌 Getting Supabase client...');
-      const supabase = getSupabaseAdminClient();
-      console.log('✅ Supabase client obtained');
-      
-      // Create batch configuration object
-      const batchConfig = {
-        folderTitle,
-        folderDescription,
-        contentMetadata,
-        batchId,
-        sessionIds
-      };
-      
-      // Process all files in the batch
-      await processBatchFiles(supabase, files, batchConfig);
-      
-      // Create and send response
-      const response = createBatchResponse(batchId, sessionIds, folderTitle, files);
-      console.log(`� Sending response with ${response.createdSessions.length} created sessions`);
-      
+      // Process batch files with database operations
+      const response = await processBatchWithDatabase(batchData);
       return res.json(response);
       
     } catch (dbError) {
@@ -1339,37 +1339,11 @@ router.post('/recover-batch/:batchId', async (req, res) => {
       });
     }
     
-    let recoveredCount = 0;
-    let errorCount = 0;
+    // Process recovery using helper function
+    const { recoveredCount, errorCount } = await processBatchSessionRecovery(batchSessions);
     
-    // Attempt to recover failed/stale sessions
-    for (const session of batchSessions) {
-      const timeSinceUpdate = Date.now() - new Date(session.lastUpdate).getTime();
-      
-      if (session.status === 'failed' && session.isRecoverable && session.retryCount < session.maxRetries) {
-        session.status = 'pending';
-        session.error = `Recovered from failure (attempt ${session.retryCount + 1})`;
-        session.lastUpdate = new Date().toISOString();
-        await persistSessionToDatabase(session);
-        recoveredCount++;
-        console.log(`🔄 Recovered failed session: ${session.id.slice(0, 12)}...`);
-      } else if (session.status === 'uploading' && timeSinceUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD) {
-        session.status = 'pending';
-        session.error = 'Recovered from stale state';
-        session.lastUpdate = new Date().toISOString();
-        await persistSessionToDatabase(session);
-        recoveredCount++;
-        console.log(`🔄 Recovered stale session: ${session.id.slice(0, 12)}...`);
-      } else if (!session.isRecoverable || session.retryCount >= session.maxRetries) {
-        errorCount++;
-      }
-    }
-    
-    const totalProgress = batchSessions.reduce((sum, session) => sum + session.progress, 0) / batchSessions.length;
-    const completedCount = batchSessions.filter(session => session.status === 'completed').length;
-    const activeCount = batchSessions.filter(session => 
-      session.status !== 'completed' && session.status !== 'failed'
-    ).length;
+    // Calculate statistics using helper function  
+    const { totalProgress, completedCount, activeCount } = calculateBatchStats(batchSessions);
     
     return res.json({
       success: true,
@@ -1396,6 +1370,108 @@ router.post('/recover-batch/:batchId', async (req, res) => {
   }
 });
 
+// Helper function to update session timing metadata
+function updateSessionTiming(session, status, previousStatus) {
+  if (status === 'uploading' && previousStatus !== 'uploading') {
+    session.metadata.uploadStartTime = new Date().toISOString();
+  }
+  
+  if (status === 'completed' && previousStatus !== 'completed') {
+    session.metadata.uploadCompleteTime = new Date().toISOString();
+    
+    // Calculate average upload speed
+    if (session.metadata.uploadStartTime && session.fileSize > 0) {
+      const uploadDuration = new Date(session.metadata.uploadCompleteTime).getTime() - 
+                            new Date(session.metadata.uploadStartTime).getTime();
+      session.metadata.averageSpeed = Math.round((session.fileSize / 1024 / 1024) / (uploadDuration / 1000)); // MB/s
+    }
+  }
+}
+
+// Helper function to update session status with timing
+function updateSessionStatus(session, status) {
+  const previousStatus = session.status;
+  session.status = status;
+  updateSessionTiming(session, status, previousStatus);
+}
+
+// Helper function to update session progress
+function updateSessionProgress(session, progress) {
+  session.progress = Math.max(0, Math.min(100, progress)); // Ensure progress is between 0-100
+  session.metadata.lastProgressUpdate = new Date().toISOString();
+}
+
+// Helper function to update session fields
+function updateSessionFields(session, step, bunnyVideoId, bunnyUploadUrl, finalUrl) {
+  if (step) session.steps[step] = true;
+  if (bunnyVideoId) session.bunnyVideoId = bunnyVideoId;
+  if (bunnyUploadUrl) session.bunnyUploadUrl = bunnyUploadUrl;
+  if (finalUrl) session.finalUrl = finalUrl;
+}
+
+// Helper function to handle session error processing
+function handleSessionError(session, sessionId, error, res) {
+  const willRetry = handleUploadError(sessionId, error, true);
+  if (!willRetry) {
+    return res.status(500).json({
+      success: false,
+      error: session.error,
+      sessionId,
+      retryCount: session.retryCount,
+      maxRetries: session.maxRetries
+    });
+  }
+  return null;
+}
+
+// Helper function to reset error state
+function resetSessionErrorState(session) {
+  session.error = null;
+  session.failureReason = null;
+}
+
+// Helper function to create session response
+function createSessionResponse(session) {
+  return {
+    success: true,
+    session: {
+      ...session,
+      // Include recovery information
+      isRecoverable: session.isRecoverable,
+      retryCount: session.retryCount,
+      maxRetries: session.maxRetries,
+      networkErrors: session.networkErrors.slice(-3) // Only return last 3 errors
+    },
+    message: 'Upload session updated'
+  };
+}
+
+// Helper function to generate session statistics
+function generateSessionStats(allSessions) {
+  const uniqueBatchSet = new Set(allSessions.map(s => s && s.batchId).filter(Boolean));
+  
+  return {
+    totalSessions: allSessions.length,
+    uniqueBatches: uniqueBatchSet.size,
+    statusBreakdown: {
+      pending: allSessions.filter(s => s && s.status === 'pending').length,
+      uploading: allSessions.filter(s => s && s.status === 'uploading').length,
+      completed: allSessions.filter(s => s && s.status === 'completed').length,
+      failed: allSessions.filter(s => s && s.status === 'failed').length,
+      stale: allSessions.filter(s => s && s.status === 'stale').length
+    }
+  };
+}
+
+// Helper function to perform cleanup operations
+function performCleanupOperations() {
+  console.log('🧹 Manual cleanup requested');
+  const cleanedCount = cleanupStaleSessions();
+  const deduplicatedCount = deduplicateBatchSessions();
+  
+  return { cleanedCount, deduplicatedCount };
+}
+
 // POST /api/admin/upload-tracking/cleanup - Manual cleanup endpoint
 router.post('/cleanup', async (req, res) => {
   try {
@@ -1403,26 +1479,13 @@ router.post('/cleanup', async (req, res) => {
     
     const beforeCount = uploadSessions.size;
     
-    console.log('🧹 Manual cleanup requested');
-    const cleanedCount = cleanupStaleSessions();
-    const deduplicatedCount = deduplicateBatchSessions();
+    const { cleanedCount, deduplicatedCount } = performCleanupOperations();
     
     const afterCount = uploadSessions.size;
     const totalRemoved = beforeCount - afterCount;
     
     const allSessions = Array.from(uploadSessions.values());
-    const uniqueBatchSet = new Set(allSessions.map(s => s && s.batchId).filter(Boolean));
-    const stats = {
-      totalSessions: afterCount,
-      uniqueBatches: uniqueBatchSet.size,
-      statusBreakdown: {
-        pending: allSessions.filter(s => s && s.status === 'pending').length,
-        uploading: allSessions.filter(s => s && s.status === 'uploading').length,
-        completed: allSessions.filter(s => s && s.status === 'completed').length,
-        failed: allSessions.filter(s => s && s.status === 'failed').length,
-        stale: allSessions.filter(s => s && s.status === 'stale').length
-      }
-    };
+    const stats = generateSessionStats(allSessions);
     
     return res.json({
       success: true,
@@ -1445,6 +1508,141 @@ router.post('/cleanup', async (req, res) => {
     });
   }
 });
+
+// Helper function to update database with final URL
+async function updateDatabaseWithFinalUrl(session, finalUrl) {
+  console.log(`💾 Updating database with final URL: ${finalUrl}`);
+  const supabase = getSupabaseAdminClient();
+  
+  const { error: updateError } = await supabase
+    .from('content_entries')
+    .update({ 
+      media_url: finalUrl
+    })
+    .eq('id', session.contentEntryId)
+    .select()
+    .single();
+    
+  if (updateError) {
+    console.error(`❌ Database update failed:`, updateError);
+    throw new Error(`Database update failed: ${updateError.message}`);
+  }
+  
+  console.log(`✅ Database updated successfully for content entry ${session.contentEntryId}`);
+}
+
+// Helper function to recover failed session
+async function recoverFailedSession(session) {
+  session.status = 'pending';
+  session.error = `Recovered from failure (attempt ${session.retryCount + 1})`;
+  session.lastUpdate = new Date().toISOString();
+  await persistSessionToDatabase(session);
+  console.log(`🔄 Recovered failed session: ${session.id.slice(0, 12)}...`);
+}
+
+// Helper function to recover stale session
+async function recoverStaleSession(session) {
+  session.status = 'pending';
+  session.error = 'Recovered from stale state';
+  session.lastUpdate = new Date().toISOString();
+  await persistSessionToDatabase(session);
+  console.log(`🔄 Recovered stale session: ${session.id.slice(0, 12)}...`);
+}
+
+// Helper function to calculate batch recovery statistics
+function calculateBatchStats(batchSessions) {
+  const totalProgress = batchSessions.reduce((sum, session) => sum + session.progress, 0) / batchSessions.length;
+  const completedCount = batchSessions.filter(session => session.status === 'completed').length;
+  const activeCount = batchSessions.filter(session => 
+    session.status !== 'completed' && session.status !== 'failed'
+  ).length;
+  
+  return { totalProgress, completedCount, activeCount };
+}
+
+// Helper function to process batch session recovery
+async function processBatchSessionRecovery(batchSessions) {
+  let recoveredCount = 0;
+  let errorCount = 0;
+  
+  for (const session of batchSessions) {
+    const timeSinceUpdate = Date.now() - new Date(session.lastUpdate).getTime();
+    
+    if (session.status === 'failed' && session.isRecoverable && session.retryCount < session.maxRetries) {
+      await recoverFailedSession(session);
+      recoveredCount++;
+    } else if (session.status === 'uploading' && timeSinceUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD) {
+      await recoverStaleSession(session);
+      recoveredCount++;
+    } else if (!session.isRecoverable || session.retryCount >= session.maxRetries) {
+      errorCount++;
+    }
+  }
+  
+  return { recoveredCount, errorCount };
+}
+
+// Helper function to mark session as completed
+function markSessionAsCompleted(session, sessionId, bunnyVideoId, finalUrl) {
+  session.status = 'completed';
+  session.progress = 100;
+  session.finalUrl = finalUrl;
+  session.bunnyVideoId = bunnyVideoId;
+  session.completedAt = new Date().toISOString();
+  session.lastUpdate = new Date().toISOString();
+  session.steps.databaseUpdate = true;
+  
+  console.log(`✅ Upload completed: ${sessionId} - ${finalUrl}`);
+}
+
+// Helper function to handle upload completion with database update
+async function handleUploadCompletionWithDatabase(session, sessionId, bunnyVideoId, finalUrl) {
+  try {
+    await updateDatabaseWithFinalUrl(session, finalUrl);
+    markSessionAsCompleted(session, sessionId, bunnyVideoId, finalUrl);
+    
+    return {
+      success: true,
+      sessionId,
+      session,
+      message: 'Upload completed and database updated successfully'
+    };
+  } catch (dbError) {
+    console.error(`❌ Database error:`, dbError);
+    
+    // Update session with error but don't fail the response
+    session.error = `Database error: ${dbError.message}`;
+    session.status = 'failed';
+    session.lastUpdate = new Date().toISOString();
+    
+    return {
+      success: false,
+      error: 'Database update failed',
+      details: dbError.message,
+      sessionId,
+      statusCode: 500
+    };
+  }
+}
+
+// Helper function to handle upload completion without database update
+function handleUploadCompletionWithoutDatabase(session, sessionId, bunnyVideoId, finalUrl) {
+  session.status = 'completed';
+  session.progress = 100;
+  session.finalUrl = finalUrl || '[COMPLETED]';
+  session.bunnyVideoId = bunnyVideoId;
+  session.completedAt = new Date().toISOString();
+  session.lastUpdate = new Date().toISOString();
+  
+  console.log(`✅ Session marked as completed: ${sessionId}`);
+  
+  return {
+    success: true,
+    sessionId,
+    session,
+    message: 'Upload session completed'
+  };
+}
 
 // POST /api/admin/upload-tracking/upload-complete - Complete upload and update database
 router.post('/upload-complete', async (req, res) => {
@@ -1473,79 +1671,20 @@ router.post('/upload-complete', async (req, res) => {
     
     console.log(`✅ Found session for ${session.filename} (Content Entry ID: ${session.contentEntryId})`);
     
-    // Update the database with the final media URL
+    // Handle completion based on whether database update is needed
+    let result;
     if (finalUrl && session.contentEntryId) {
-      try {
-        console.log(`💾 Updating database with final URL: ${finalUrl}`);
-        const supabase = getSupabaseAdminClient();
-        
-        const { error: updateError } = await supabase
-          .from('content_entries')
-          .update({ 
-            media_url: finalUrl
-          })
-          .eq('id', session.contentEntryId)
-          .select()
-          .single();
-          
-        if (updateError) {
-          console.error(`❌ Database update failed:`, updateError);
-          throw new Error(`Database update failed: ${updateError.message}`);
-        }
-        
-        console.log(`✅ Database updated successfully for content entry ${session.contentEntryId}`);
-        
-        // Mark session as completed
-        session.status = 'completed';
-        session.progress = 100;
-        session.finalUrl = finalUrl;
-        session.bunnyVideoId = bunnyVideoId;
-        session.completedAt = new Date().toISOString();
-        session.lastUpdate = new Date().toISOString();
-        session.steps.databaseUpdate = true;
-        
-        console.log(`✅ Upload completed: ${sessionId} - ${finalUrl}`);
-        
-        return res.json({
-          success: true,
-          sessionId,
-          session,
-          message: 'Upload completed and database updated successfully'
-        });
-        
-      } catch (dbError) {
-        console.error(`❌ Database error:`, dbError);
-        
-        // Update session with error but don't fail the response
-        session.error = `Database error: ${dbError.message}`;
-        session.status = 'failed';
-        session.lastUpdate = new Date().toISOString();
-        
-        return res.status(500).json({
-          success: false,
-          error: 'Database update failed',
-          details: dbError.message,
-          sessionId
-        });
-      }
+      result = await handleUploadCompletionWithDatabase(session, sessionId, bunnyVideoId, finalUrl);
     } else {
-      // Just mark session as completed without database update
-      session.status = 'completed';
-      session.progress = 100;
-      session.finalUrl = finalUrl || '[COMPLETED]';
-      session.bunnyVideoId = bunnyVideoId;
-      session.completedAt = new Date().toISOString();
-      session.lastUpdate = new Date().toISOString();
-      
-      console.log(`✅ Session marked as completed: ${sessionId}`);
-      
-      return res.json({
-        success: true,
-        sessionId,
-        session,
-        message: 'Upload session completed'
-      });
+      result = handleUploadCompletionWithoutDatabase(session, sessionId, bunnyVideoId, finalUrl);
     }
+    
+    // Return appropriate response based on result
+    if (result.statusCode) {
+      return res.status(result.statusCode).json(result);
+    }
+    
+    return res.json(result);
     
   } catch (error) {
     console.error('❌ Error completing upload:', error);
