@@ -8,8 +8,175 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-t
 // In-memory upload tracking (in production, use Redis or database)
 const uploadSessions = new Map();
 
-console.log('🔥 UPLOAD-TRACKING ROUTER LOADED - BATCH ENDPOINT AVAILABLE'); 
+// Memory management configuration
+const MEMORY_CONFIG = {
+  MAX_SESSIONS: 100,           // Maximum sessions to keep in memory
+  CLEANUP_INTERVAL: 5 * 60 * 1000,  // Cleanup every 5 minutes
+  SESSION_TIMEOUT: 2 * 60 * 60 * 1000,  // Sessions expire after 2 hours
+  COMPLETED_RETENTION: 30 * 60 * 1000,  // Keep completed sessions for 30 minutes
+  FAILED_RETENTION: 10 * 60 * 1000      // Keep failed sessions for 10 minutes
+};
+
+// Cleanup function to prevent memory leaks
+function cleanupStaleSessions() {
+  const now = Date.now();
+  const sessionArray = Array.from(uploadSessions.entries());
+  let cleanedCount = 0;
+  
+  console.log(`🧹 Running session cleanup - Total sessions: ${sessionArray.length}`);
+  
+  for (const [sessionId, session] of sessionArray) {
+    const sessionAge = now - new Date(session.startTime).getTime();
+    const lastUpdateAge = now - new Date(session.lastUpdate).getTime();
+    
+    let shouldCleanup = false;
+    let reason = '';
+    
+    // Check various cleanup conditions
+    if (sessionAge > MEMORY_CONFIG.SESSION_TIMEOUT) {
+      shouldCleanup = true;
+      reason = 'session timeout';
+    } else if (session.status === 'completed' && lastUpdateAge > MEMORY_CONFIG.COMPLETED_RETENTION) {
+      shouldCleanup = true;
+      reason = 'completed retention exceeded';
+    } else if (session.status === 'failed' && lastUpdateAge > MEMORY_CONFIG.FAILED_RETENTION) {
+      shouldCleanup = true;
+      reason = 'failed retention exceeded';
+    } else if (session.status === 'stale' && lastUpdateAge > 10 * 60 * 1000) {
+      shouldCleanup = true;
+      reason = 'stale session cleanup';
+    }
+    
+    if (shouldCleanup) {
+      uploadSessions.delete(sessionId);
+      cleanedCount++;
+      console.log(`�️ Cleaned session ${sessionId.slice(0, 12)}... (${reason})`);
+    }
+  }
+  
+  // If still over limit, clean oldest sessions
+  if (uploadSessions.size > MEMORY_CONFIG.MAX_SESSIONS) {
+    const remaining = Array.from(uploadSessions.entries())
+      .sort((a, b) => new Date(a[1].lastUpdate).getTime() - new Date(b[1].lastUpdate).getTime());
+    
+    const excessCount = uploadSessions.size - MEMORY_CONFIG.MAX_SESSIONS;
+    for (let i = 0; i < excessCount; i++) {
+      const [sessionId] = remaining[i];
+      uploadSessions.delete(sessionId);
+      cleanedCount++;
+      console.log(`🗑️ Cleaned oldest session ${sessionId.slice(0, 12)}... (memory limit)`);
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`✅ Cleanup complete: Removed ${cleanedCount} sessions, ${uploadSessions.size} remaining`);
+  }
+  
+  return cleanedCount;
+}
+
+// Start automatic cleanup interval
+setInterval(cleanupStaleSessions, MEMORY_CONFIG.CLEANUP_INTERVAL);
+
+// Clean up duplicate batch sessions
+function deduplicateBatchSessions() {
+  const batchMap = new Map();
+  const duplicates = [];
+  
+  // Step 1: Identify duplicates
+  identifyDuplicateSessions(batchMap, duplicates);
+  
+  // Step 2: Remove duplicates
+  const removedCount = removeDuplicateSessions(duplicates);
+  
+  logDeduplicationResults(removedCount);
+  
+  return removedCount;
+}
+
+// Helper function to identify duplicate sessions
+function identifyDuplicateSessions(batchMap, duplicates) {
+  for (const [sessionId, session] of uploadSessions.entries()) {
+    if (!isValidBatchSession(session)) {
+      continue;
+    }
+    
+    const key = createBatchKey(session);
+    
+    if (batchMap.has(key)) {
+      handleDuplicateSession(batchMap, duplicates, key, sessionId, session);
+    } else {
+      batchMap.set(key, { sessionId, session });
+    }
+  }
+}
+
+// Helper function to check if session is valid for batch deduplication
+function isValidBatchSession(session) {
+  return session && session.batchId && session.filename;
+}
+
+// Helper function to create batch key
+function createBatchKey(session) {
+  return `${session.batchId}_${session.filename}`;
+}
+
+// Helper function to handle duplicate session logic
+function handleDuplicateSession(batchMap, duplicates, key, sessionId, session) {
+  const existing = batchMap.get(key);
+  const existingTime = getSessionTime(existing.session);
+  const currentTime = getSessionTime(session);
+  
+  if (currentTime > existingTime) {
+    duplicates.push(existing.sessionId);
+    batchMap.set(key, { sessionId, session });
+  } else {
+    duplicates.push(sessionId);
+  }
+}
+
+// Helper function to get session time safely
+function getSessionTime(session) {
+  return new Date(session.startTime || session.lastUpdate).getTime();
+}
+
+// Helper function to remove duplicate sessions
+function removeDuplicateSessions(duplicates) {
+  let removedCount = 0;
+  
+  for (const sessionId of duplicates) {
+    if (removeSingleDuplicateSession(sessionId)) {
+      removedCount++;
+    }
+  }
+  
+  return removedCount;
+}
+
+// Helper function to remove a single duplicate session
+function removeSingleDuplicateSession(sessionId) {
+  try {
+    if (uploadSessions.has(sessionId)) {
+      uploadSessions.delete(sessionId);
+      console.log(`🗑️ Removed duplicate batch session: ${sessionId.slice(0, 12)}...`);
+      return true;
+    }
+  } catch (error) {
+    console.error(`❌ Error removing duplicate session ${sessionId}:`, error);
+  }
+  return false;
+}
+
+// Helper function to log deduplication results
+function logDeduplicationResults(removedCount) {
+  if (removedCount > 0) {
+    console.log(`✅ Deduplication complete: Removed ${removedCount} duplicate batch sessions`);
+  }
+}
+
+console.log('�🔥 UPLOAD-TRACKING ROUTER LOADED - BATCH ENDPOINT AVAILABLE');
 console.log('📋 Available endpoints: start, update, status, complete, active, start-batch, batch/:id, credentials/:sessionId, upload-complete');
+console.log(`🛡️ Memory protection enabled - Max sessions: ${MEMORY_CONFIG.MAX_SESSIONS}, Cleanup interval: ${MEMORY_CONFIG.CLEANUP_INTERVAL/1000}s`);
 
 // Helper function to verify admin token
 function verifyAdminToken(req) {
@@ -170,6 +337,16 @@ async function processBatchFile(supabase, file, index, batchConfig) {
   
   console.log(`🔄 Processing file ${partNumber}: ${file.filename}`);
   
+  // Check if this file already has a session in this batch
+  const existingSession = Array.from(uploadSessions.values())
+    .find(session => session.batchId === batchId && session.filename === file.filename);
+  
+  if (existingSession) {
+    console.log(`⚠️ Session already exists for ${file.filename} in batch ${batchId}, skipping creation`);
+    sessionIds.push(existingSession.id);
+    return;
+  }
+  
   // Create content entry
   const contentEntry = createContentEntryObject(file, folderTitle, folderDescription, contentMetadata, batchId, partNumber);
   
@@ -178,15 +355,29 @@ async function processBatchFile(supabase, file, index, batchConfig) {
   
   console.log(`✅ Created content entry ${partNumber} with ID: ${finalEntry.id}`);
   
-  // Create upload session
-  const sessionId = `upload_${Date.now()}_${index}_${Math.random().toString(36).substring(2)}`;
-  const session = createUploadSession(sessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber);
+  // Create unique upload session ID with batch info and timestamp
+  const uniqueSuffix = `${index}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const sessionId = `upload_${batchId.split('_')[1]}_${uniqueSuffix}`;
+  
+  // Double-check session ID is unique
+  let attempts = 0;
+  let finalSessionId = sessionId;
+  while (uploadSessions.has(finalSessionId) && attempts < 5) {
+    attempts++;
+    finalSessionId = `${sessionId}_${attempts}`;
+  }
+  
+  if (attempts >= 5) {
+    throw new Error(`Failed to generate unique session ID after 5 attempts for ${file.filename}`);
+  }
+  
+  const session = createUploadSession(finalSessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber);
   
   // Store session in memory
-  uploadSessions.set(sessionId, session);
-  sessionIds.push(sessionId);
+  uploadSessions.set(finalSessionId, session);
+  sessionIds.push(finalSessionId);
   
-  console.log(`🚀 Batch session ${partNumber}: ${sessionId} for ${file.filename} (Content Entry ID: ${finalEntry.id})`);
+  console.log(`🚀 Batch session ${partNumber}: ${finalSessionId} for ${file.filename} (Content Entry ID: ${finalEntry.id})`);
   
   // Add small delay to ensure unique timestamps
   await new Promise(resolve => setTimeout(resolve, 10));
@@ -194,16 +385,44 @@ async function processBatchFile(supabase, file, index, batchConfig) {
 
 // Main batch processing function
 async function processBatchFiles(supabase, files, batchConfig) {
-  const { folderTitle, sessionIds } = batchConfig;
+  const { folderTitle, sessionIds, batchId } = batchConfig;
   
-  console.log(`📁 Starting batch upload: ${batchConfig.batchId} - "${folderTitle}" (${files.length} files)`);
+  console.log(`📁 Starting batch upload: ${batchId} - "${folderTitle}" (${files.length} files)`);
+  
+  // Clean up any existing sessions for this batch to prevent duplicates
+  const existingBatchSessions = Array.from(uploadSessions.entries())
+    .filter(([_, session]) => session && session.batchId === batchId);
+  
+  if (existingBatchSessions.length > 0) {
+    console.log(`🧹 Removing ${existingBatchSessions.length} existing sessions for batch ${batchId}`);
+    for (const [sessionId] of existingBatchSessions) {
+      uploadSessions.delete(sessionId);
+    }
+  }
+  
+  // Run cleanup and deduplication before creating new sessions
+  const cleanedCount = cleanupStaleSessions();
+  const deduplicatedCount = deduplicateBatchSessions();
+  
+  console.log(`🧹 Pre-processing cleanup: ${cleanedCount} sessions cleaned, ${deduplicatedCount} duplicates removed`);
   
   for (let i = 0; i < files.length; i++) {
     await processBatchFile(supabase, files[i], i, batchConfig);
+    
+    // Prevent rapid duplicate creation
+    if (i < files.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 50)); // 50ms delay between files
+    }
   }
   
   console.log(`✅ Batch upload complete: ${sessionIds.length} sessions created`);
   console.log(`🗂️ Total sessions in memory: ${uploadSessions.size}`);
+  
+  // Run final cleanup to ensure memory stays healthy
+  const finalCleanedCount = cleanupStaleSessions();
+  if (finalCleanedCount > 0) {
+    console.log(`🧹 Post-processing cleanup: ${finalCleanedCount} additional sessions cleaned`);
+  }
 }
 
 // Helper function to create response object
@@ -431,12 +650,16 @@ router.get('/active', async (req, res) => {
     
     console.log(`📊 Total sessions in memory: ${uploadSessions.size}`);
     
+    // Run cleanup before returning active sessions
+    cleanupStaleSessions();
+    deduplicateBatchSessions();
+    
     const allSessions = Array.from(uploadSessions.values());
     const activeSessions = allSessions
       .filter(session => session.status !== 'completed' && session.status !== 'failed')
       .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
     
-    console.log(`✅ Found ${activeSessions.length} active sessions`);
+    console.log(`✅ Found ${activeSessions.length} active sessions (after cleanup)`);
     
     // Group by batch for better organization
     const batchGroups = {};
@@ -453,13 +676,26 @@ router.get('/active', async (req, res) => {
       }
     }
     
+    const memoryStats = {
+      totalSessions: uploadSessions.size,
+      activeSessions: activeSessions.length,
+      uniqueBatches: Object.keys(batchGroups).length,
+      statusBreakdown: {
+        pending: allSessions.filter(s => s.status === 'pending').length,
+        uploading: allSessions.filter(s => s.status === 'uploading').length,
+        completed: allSessions.filter(s => s.status === 'completed').length,
+        failed: allSessions.filter(s => s.status === 'failed').length,
+        stale: allSessions.filter(s => s.status === 'stale').length
+      }
+    };
+    
     return res.json({
       success: true,
       sessions: activeSessions,
       count: activeSessions.length,
-      totalSessionsInMemory: uploadSessions.size,
       batchGroups,
       singleSessions,
+      memoryStats,
       debug: {
         allSessionStatuses: allSessions.map(s => ({ id: s.id, status: s.status, batchId: s.batchId }))
       }
@@ -551,9 +787,15 @@ router.get('/batch/:batchId', async (req, res) => {
     console.log(`🔍 Looking for batch: ${batchId}`);
     console.log(`📊 Total sessions in memory: ${uploadSessions.size}`);
     
+    // Run cleanup and deduplication before looking up sessions
+    cleanupStaleSessions();
+    deduplicateBatchSessions();
+    
     // Debug: Log all session batch IDs
     const allSessions = Array.from(uploadSessions.values());
-    console.log(`📋 All batch IDs in memory:`, allSessions.map(s => s.batchId).filter(Boolean));
+    const uniqueBatchSet = new Set(allSessions.map(s => s.batchId).filter(Boolean));
+    const uniqueBatchIds = [...uniqueBatchSet];
+    console.log(`📋 Unique batch IDs in memory (${uniqueBatchSet.size}):`, uniqueBatchIds);
     
     const batchSessions = allSessions
       .filter(session => session.batchId === batchId)
@@ -568,7 +810,7 @@ router.get('/batch/:batchId', async (req, res) => {
         debug: {
           requestedBatchId: batchId,
           totalSessionsInMemory: uploadSessions.size,
-          allBatchIds: allSessions.map(s => s.batchId).filter(Boolean)
+          uniqueBatchIds: uniqueBatchIds
         }
       });
     }
@@ -590,7 +832,11 @@ router.get('/batch/:batchId', async (req, res) => {
       failedCount,
       activeCount,
       totalProgress: Math.round(totalProgress),
-      sessions: batchSessions
+      sessions: batchSessions,
+      memoryStats: {
+        totalSessions: uploadSessions.size,
+        uniqueBatches: uniqueBatchSet.size
+      }
     });
     
   } catch (error) {
@@ -598,6 +844,56 @@ router.get('/batch/:batchId', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to get batch status'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/cleanup - Manual cleanup endpoint
+router.post('/cleanup', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const beforeCount = uploadSessions.size;
+    
+    console.log('🧹 Manual cleanup requested');
+    const cleanedCount = cleanupStaleSessions();
+    const deduplicatedCount = deduplicateBatchSessions();
+    
+    const afterCount = uploadSessions.size;
+    const totalRemoved = beforeCount - afterCount;
+    
+    const allSessions = Array.from(uploadSessions.values());
+    const uniqueBatchSet = new Set(allSessions.map(s => s && s.batchId).filter(Boolean));
+    const stats = {
+      totalSessions: afterCount,
+      uniqueBatches: uniqueBatchSet.size,
+      statusBreakdown: {
+        pending: allSessions.filter(s => s && s.status === 'pending').length,
+        uploading: allSessions.filter(s => s && s.status === 'uploading').length,
+        completed: allSessions.filter(s => s && s.status === 'completed').length,
+        failed: allSessions.filter(s => s && s.status === 'failed').length,
+        stale: allSessions.filter(s => s && s.status === 'stale').length
+      }
+    };
+    
+    return res.json({
+      success: true,
+      message: `Cleanup completed: ${totalRemoved} sessions removed (${cleanedCount} stale, ${deduplicatedCount} duplicates)`,
+      before: beforeCount,
+      after: afterCount,
+      removed: totalRemoved,
+      details: {
+        staleCleaned: cleanedCount,
+        duplicatesRemoved: deduplicatedCount
+      },
+      stats
+    });
+    
+  } catch (error) {
+    console.error('❌ Error during manual cleanup:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to perform cleanup'
     });
   }
 });
@@ -635,7 +931,7 @@ router.post('/upload-complete', async (req, res) => {
         console.log(`💾 Updating database with final URL: ${finalUrl}`);
         const supabase = getSupabaseAdminClient();
         
-        const { data: updateData, error: updateError } = await supabase
+        const { error: updateError } = await supabase
           .from('content_entries')
           .update({ 
             media_url: finalUrl
