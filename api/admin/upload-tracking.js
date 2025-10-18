@@ -2083,6 +2083,76 @@ router.post('/fix-pending-urls', async (req, res) => {
   }
 });
 
+// POST /api/admin/upload-tracking/convert-play-to-embed - Convert /play/ URLs to /embed/ URLs
+router.post('/convert-play-to-embed', async (req, res) => {
+  try {
+    console.log('🔄 Converting /play/ URLs to /embed/ URLs...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Find all videos with /play/ URLs
+    const { data: playVideos, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .like('media_url', '%/play/%');
+    
+    if (fetchError) {
+      console.error('❌ Failed to fetch play videos:', fetchError);
+      return res.status(500).json({ success: false, error: fetchError.message });
+    }
+    
+    console.log(`📊 Found ${playVideos?.length || 0} videos with /play/ URLs`);
+    
+    if (!playVideos || playVideos.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No /play/ URLs found to convert',
+        converted: 0
+      });
+    }
+    
+    let convertedCount = 0;
+    
+    // Convert each /play/ URL to /embed/
+    for (const video of playVideos) {
+      try {
+        const oldUrl = video.media_url;
+        const newUrl = oldUrl.replace('/play/', '/embed/');
+        
+        console.log(`🔄 Converting: ${video.title}`);
+        console.log(`   Old: ${oldUrl}`);
+        console.log(`   New: ${newUrl}`);
+        
+        const { error: updateError } = await supabase
+          .from('content_entries')
+          .update({ media_url: newUrl })
+          .eq('id', video.id);
+        
+        if (updateError) {
+          console.error(`❌ Failed to update video ${video.id}:`, updateError);
+        } else {
+          console.log(`✅ Converted: ${video.title}`);
+          convertedCount++;
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error processing video ${video.id}:`, error);
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: `Converted ${convertedCount} videos from /play/ to /embed/ format`,
+      converted: convertedCount,
+      total: playVideos.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in convert-play-to-embed endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Helper function to map video titles to Bunny video IDs
 function generateBunnyVideoId(title) {
   // This is a placeholder - you'll need to map these to actual Bunny CDN video IDs
@@ -2106,8 +2176,8 @@ function convertToWorkingVideoUrl(url) {
     // Extract video ID from existing URL
     let videoId = extractVideoIdFromUrl(url);
     
-    // Convert to working iframe.mediadelivery.net format
-    return `https://iframe.mediadelivery.net/play/506378/${videoId}`;
+    // Convert to working iframe.mediadelivery.net embed format for proper video player
+    return `https://iframe.mediadelivery.net/embed/506378/${videoId}`;
   } catch (error) {
     console.error('❌ Error converting video URL:', error);
     return url; // Return original if conversion fails
@@ -2128,11 +2198,11 @@ function extractVideoIdFromUrl(url) {
     return match[1]; // Return the UUID part
   }
   
-  // If already iframe format, extract the ID
-  const iframeRegex = /iframe\.mediadelivery\.net\/play\/\d+\/([a-f0-9-]+)/i;
+  // If already iframe format (play or embed), extract the ID
+  const iframeRegex = /iframe\.mediadelivery\.net\/(play|embed)\/\d+\/([a-f0-9-]+)/i;
   const iframeMatch = url.match(iframeRegex);
   if (iframeMatch) {
-    return iframeMatch[1];
+    return iframeMatch[2]; // The video ID is now in the second capture group
   }
   
   console.warn('⚠️ Could not extract video ID from URL:', url);
@@ -2151,17 +2221,17 @@ function generatePreviewUrl(videoId) {
 
 // Helper function to convert any video URL to iframe format for upload completion
 function convertToIframeUrl(originalUrl, bunnyVideoId) {
-  // If bunnyVideoId is provided, use it directly
+  // If bunnyVideoId is provided, use it directly with embed format for proper video player
   if (bunnyVideoId) {
     console.log(`✅ Using provided bunnyVideoId: ${bunnyVideoId}`);
-    return `https://iframe.mediadelivery.net/play/506378/${bunnyVideoId}`;
+    return `https://iframe.mediadelivery.net/embed/506378/${bunnyVideoId}`;
   }
   
   // Otherwise try to extract from the URL
   const extractedId = extractVideoIdFromUrl(originalUrl);
   if (extractedId && extractedId !== 'default-video-id') {
     console.log(`✅ Extracted video ID from URL: ${extractedId}`);
-    return `https://iframe.mediadelivery.net/play/506378/${extractedId}`;
+    return `https://iframe.mediadelivery.net/embed/506378/${extractedId}`;
   }
   
   console.warn('⚠️ Could not determine video ID, keeping original URL:', originalUrl);
