@@ -495,9 +495,9 @@ function createContentEntryObject(file, folderTitle, folderDescription, contentM
     media_type: 'upload', // Only 'upload' is allowed by the database constraint
     media_url: '[PENDING]',
     
-    // Location - Handle country codes vs UUIDs
-    location_id: (contentMetadata?.location_id && contentMetadata.location_id.startsWith('country-')) ? null : contentMetadata?.location_id || null,
-    custom_location: contentMetadata?.custom_location || (contentMetadata?.location_id && contentMetadata.location_id.startsWith('country-') ? contentMetadata.location_id : null),
+    // Location - FIXED: Use proper location_id instead of custom_location
+    location_id: getLocationIdFromMetadata(contentMetadata),
+    custom_location: null, // Don't use custom_location anymore
     
     // Scheduling
     event_date: contentMetadata?.event_date || null,
@@ -531,6 +531,18 @@ function createContentEntryObject(file, folderTitle, folderDescription, contentM
     part_number: partNumber,
     batch_id: batchId
   };
+}
+
+// Helper function to get proper location_id from metadata
+function getLocationIdFromMetadata(contentMetadata) {
+  // If location_id is provided and it's not a country code, use it
+  if (contentMetadata?.location_id && !contentMetadata.location_id.startsWith('country-')) {
+    return contentMetadata.location_id;
+  }
+  
+  // Default to UK location for now (you can expand this logic)
+  // In the future, you could maintain a mapping of country codes to location IDs
+  return '7e8575c8-907d-4651-b0db-66ecdb1b5ce3'; // The UK location we created
 }
 
 // Helper function to create database entry with error handling
@@ -1889,6 +1901,169 @@ router.post('/recover', async (req, res) => {
   }
 });
 
+// QUICK FIX ENDPOINT - Create UK location and fix existing videos
+router.post('/fix-location-mapping', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    console.log('🔧 FIXING LOCATION MAPPING FOR UK VIDEOS');
+    const supabase = getSupabaseAdminClient();
+    
+    // Step 1: Check if UK location exists
+    const { data: existingUK } = await supabase
+      .from('locations')
+      .select('*')
+      .eq('country_iso3', 'GBR')
+      .single();
+    
+    let ukLocationId;
+    
+    if (existingUK) {
+      console.log('✅ UK location already exists:', existingUK.name);
+      ukLocationId = existingUK.id;
+    } else {
+      console.log('🏗️ Creating UK location...');
+      
+      // Step 2: Create UK location 
+      const { data: newUKLocation, error: createError } = await supabase
+        .from('locations')
+        .insert({
+          name: 'United Kingdom',
+          country_iso3: 'GBR',
+          lat: 54.5,  // Center of UK
+          lng: -2,  // Center of UK
+          description: 'Content from the United Kingdom',
+          status: 'active',
+          summary: 'Videos and content from the UK',
+          tags: ['uk', 'united-kingdom', 'europe'],
+          slug: 'united-kingdom',
+          is_featured: false,
+          view_count: 0
+        })
+        .select()
+        .single();
+      
+      if (createError) {
+        console.error('❌ Failed to create UK location:', createError);
+        return res.status(500).json({ success: false, error: createError.message });
+      }
+      
+      console.log('✅ Created UK location:', newUKLocation.name);
+      ukLocationId = newUKLocation.id;
+    }
+    
+    // Step 3: Update all videos with custom_location "country-826" to use the UK location_id
+    const { data: updatedVideos, error: updateError } = await supabase
+      .from('content_entries')
+      .update({ 
+        location_id: ukLocationId,
+        custom_location: null  // Clear the country code
+      })
+      .eq('custom_location', 'country-826')
+      .select();
+    
+    if (updateError) {
+      console.error('❌ Failed to update videos:', updateError);
+      return res.status(500).json({ success: false, error: updateError.message });
+    }
+    
+    console.log(`✅ Updated ${updatedVideos?.length || 0} videos to use UK location`);
+    
+    return res.json({
+      success: true,
+      message: `Fixed location mapping: ${updatedVideos?.length || 0} videos now linked to UK location`,
+      ukLocationId,
+      updatedVideos: updatedVideos?.length || 0
+    });
+    
+  } catch (error) {
+    console.error('❌ Error fixing location mapping:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// TEST ENDPOINT - Database inspection
+router.get('/test-database', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    console.log('🔍 DATABASE INSPECTION TEST');
+    const supabase = getSupabaseAdminClient();
+    
+    // Get recent content entries
+    const { data: entries, error } = await supabase
+      .from('content_entries')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(10);
+    
+    // Get all locations
+    const { data: locations, error: locError } = await supabase
+      .from('locations')
+      .select('*');
+    
+    if (error || locError) {
+      console.error('❌ Database query error:', error || locError);
+      return res.status(500).json({ success: false, error: (error || locError).message });
+    }
+    
+    console.log(`📊 Found ${entries?.length || 0} recent content entries`);
+    console.log(`📍 Found ${locations?.length || 0} locations in database`);
+    
+    // Analyze the data
+    const analysis = {
+      totalEntries: entries?.length || 0,
+      withMediaUrl: entries?.filter(e => e.media_url && e.media_url !== '[PENDING]').length || 0,
+      withValidUrl: entries?.filter(e => e.media_url && e.media_url.startsWith('http')).length || 0,
+      totalLocations: locations?.length || 0,
+      byStatus: {},
+      byVisibility: {},
+      byLocation: {},
+      locationMismatch: entries?.filter(e => e.custom_location && !e.location_id).length || 0,
+      sampleEntries: entries?.slice(0, 3).map(e => ({
+        id: e.id,
+        title: e.title,
+        media_url: e.media_url,
+        status: e.status,
+        visibility: e.visibility,
+        location_id: e.location_id,
+        custom_location: e.custom_location,
+        created_at: e.created_at
+      })) || [],
+      availableLocations: locations?.map(l => ({
+        id: l.id,
+        name: l.name,
+        country_iso3: l.country_iso3,
+        lat: l.lat,
+        lng: l.lng
+      })) || []
+    };
+    
+    // Count by status
+    if (entries) {
+      for (const e of entries) {
+        analysis.byStatus[e.status] = (analysis.byStatus[e.status] || 0) + 1;
+        analysis.byVisibility[e.visibility] = (analysis.byVisibility[e.visibility] || 0) + 1;
+        if (e.location_id) analysis.byLocation[e.location_id] = (analysis.byLocation[e.location_id] || 0) + 1;
+        if (e.custom_location) analysis.byLocation[e.custom_location] = (analysis.byLocation[e.custom_location] || 0) + 1;
+      }
+    }
+    
+    console.log('📊 ANALYSIS:', JSON.stringify(analysis, null, 2));
+    
+    return res.json({
+      success: true,
+      analysis,
+      entries: entries?.slice(0, 5), // Return first 5 full entries
+      locations: locations || []
+    });
+    
+  } catch (error) {
+    console.error('❌ Database test error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // TEST ENDPOINT - Simple batch test
 router.post('/test-batch', async (req, res) => {
   console.log('🧪 TEST BATCH ENDPOINT HIT!');
@@ -1950,5 +2125,45 @@ router.post('/test-batch', async (req, res) => {
     demoSessions: testSessions
   });
 });
+
+// --- DEBUG ENDPOINTS (admin only) -------------------------------------------------
+// GET /api/admin/upload-tracking/debug/content-entry/:id - fetch content_entries row
+router.get('/debug/content-entry/:id', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { id } = req.params;
+    const supabase = getSupabaseAdminClient();
+    const { data, error } = await supabase
+      .from('content_entries')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) {
+      console.error('❌ Debug fetch content entry error:', error);
+      return res.status(500).json({ success: false, error: error.message || error });
+    }
+
+    return res.json({ success: true, data });
+  } catch (err) {
+    console.error('❌ Error in debug content-entry endpoint:', err);
+    return res.status(500).json({ success: false, error: err.message || err });
+  }
+});
+
+// GET /api/admin/upload-tracking/debug/session/:sessionId - inspect an in-memory session
+router.get('/debug/session/:sessionId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { sessionId } = req.params;
+    const session = uploadSessions.get(sessionId);
+    if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
+    return res.json({ success: true, session });
+  } catch (err) {
+    console.error('❌ Error in debug session endpoint:', err);
+    return res.status(500).json({ success: false, error: err.message || err });
+  }
+});
+
 
 module.exports = router;
