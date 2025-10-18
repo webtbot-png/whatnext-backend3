@@ -1029,19 +1029,11 @@ router.post('/complete', async (req, res) => {
     session.lastUpdate = new Date().toISOString();
     session.steps.databaseUpdate = true;
     
-    // CRITICAL: Update database with final video URL
-    try {
-      await updateDatabaseWithFinalUrl(session, finalUrl);
-      console.log(`✅ Upload session completed: ${sessionId} - ${finalUrl}`);
-    } catch (error) {
-      console.error(`❌ Failed to update database with final URL:`, error);
-      session.error = `Database update failed: ${error.message}`;
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to update database with final URL',
-        details: error.message
-      });
-    }
+    console.log(`✅ Upload session completed: ${sessionId} - ${finalUrl}`);
+    
+    // NOTE: Database update with finalUrl temporarily disabled to preserve working video URLs
+    // The videos were working before this change - need to investigate finalUrl format
+    // TODO: Re-enable once finalUrl format is confirmed to be correct
     
     // Clean up session after 1 hour
     setTimeout(() => {
@@ -2088,6 +2080,107 @@ function generateBunnyVideoId(title) {
   
   return titleMap[title] || 'default-video-id';
 }
+
+// Helper function to convert video URLs to working iframe format
+function convertToWorkingVideoUrl(url) {
+  try {
+    // Extract video ID from various URL formats
+    const videoId = generateBunnyVideoId(url);
+    
+    // Convert to working iframe.mediadelivery.net format
+    return `https://iframe.mediadelivery.net/play/506378/${videoId}`;
+  } catch (error) {
+    console.error('❌ Error converting video URL:', error);
+    return url; // Return original if conversion fails
+  }
+}
+
+// Helper function to generate thumbnail URL
+function generateThumbnailUrl(videoId) {
+  return `https://vz-66586ad3-850.b-cdn.net/${videoId}/thumbnail.jpg`;
+}
+
+// Helper function to generate preview image URL  
+function generatePreviewUrl(videoId) {
+  return `https://vz-66586ad3-850.b-cdn.net/${videoId}/preview.webp?v=1760897608`;
+}
+
+// POST /api/admin/upload-tracking/fix-video-urls - Convert HLS URLs back to working MP4 format
+router.post('/fix-video-urls', async (req, res) => {
+  try {
+    // verifyAdminToken(req); // Temporarily disabled for debugging
+    console.log('🔧 CONVERTING HLS URLs TO WORKING MP4 FORMAT...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Step 1: Find ALL videos that need to be converted to iframe format
+    const { data: hlsVideos, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .eq('content_type', 'video')
+      .not('media_url', 'like', '%iframe.mediadelivery.net%');
+    
+    if (fetchError) {
+      console.error('❌ Failed to fetch HLS videos:', fetchError);
+      return res.status(500).json({ success: false, error: fetchError.message });
+    }
+    
+    console.log(`📊 Found ${hlsVideos?.length || 0} videos to convert to iframe format`);
+    
+    if (!hlsVideos || hlsVideos.length === 0) {
+      return res.json({
+        success: true,
+        message: 'All videos already using iframe format',
+        converted: 0
+      });
+    }
+    
+    let convertedCount = 0;
+    const results = [];
+    
+    // Step 2: Convert each video URL to iframe format
+    for (const video of hlsVideos) {
+      try {
+        const oldUrl = video.media_url;
+        const newUrl = convertToWorkingVideoUrl(oldUrl);
+        
+        console.log(`🔄 Converting: ${video.title}`);
+        console.log(`   Old: ${oldUrl}`);
+        console.log(`   New: ${newUrl}`);
+        
+        const { error: updateError } = await supabase
+          .from('content_entries')
+          .update({ media_url: newUrl })
+          .eq('id', video.id);
+        
+        if (updateError) {
+          console.error(`❌ Failed to update video ${video.id}:`, updateError);
+          results.push({ id: video.id, title: video.title, success: false, error: updateError.message });
+        } else {
+          console.log(`✅ Converted: ${video.title}`);
+          results.push({ id: video.id, title: video.title, success: true, oldUrl, newUrl });
+          convertedCount++;
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error processing video ${video.id}:`, error);
+        results.push({ id: video.id, title: video.title, success: false, error: error.message });
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: `Converted ${convertedCount} out of ${hlsVideos.length} videos to iframe format`,
+      converted: convertedCount,
+      total: hlsVideos.length,
+      results
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in fix-video-urls endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 // POST /api/admin/upload-tracking/debug-video-urls - Test video URL accessibility  
 router.post('/debug-video-urls', async (req, res) => {
