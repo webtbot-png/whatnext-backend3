@@ -9,7 +9,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-t
 const uploadSessions = new Map();
 
 console.log('🔥 UPLOAD-TRACKING ROUTER LOADED - BATCH ENDPOINT AVAILABLE');
-console.log('📋 Available endpoints: start, update, status, complete, active, start-batch, batch/:id');
+console.log('📋 Available endpoints: start, update, status, complete, active, start-batch, batch/:id, credentials/:sessionId, upload-complete');
 
 // Helper function to verify admin token
 function verifyAdminToken(req) {
@@ -598,6 +598,250 @@ router.get('/batch/:batchId', async (req, res) => {
     return res.status(500).json({
       success: false,
       error: error.message || 'Failed to get batch status'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/upload-complete - Complete upload and update database
+router.post('/upload-complete', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId, bunnyVideoId, finalUrl } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required field: sessionId' 
+      });
+    }
+    
+    console.log(`🎯 Completing upload for session: ${sessionId}`);
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Upload session not found',
+        sessionId 
+      });
+    }
+    
+    console.log(`✅ Found session for ${session.filename} (Content Entry ID: ${session.contentEntryId})`);
+    
+    // Update the database with the final media URL
+    if (finalUrl && session.contentEntryId) {
+      try {
+        console.log(`💾 Updating database with final URL: ${finalUrl}`);
+        const supabase = getSupabaseAdminClient();
+        
+        const { data: updateData, error: updateError } = await supabase
+          .from('content_entries')
+          .update({ 
+            media_url: finalUrl
+          })
+          .eq('id', session.contentEntryId)
+          .select()
+          .single();
+          
+        if (updateError) {
+          console.error(`❌ Database update failed:`, updateError);
+          throw new Error(`Database update failed: ${updateError.message}`);
+        }
+        
+        console.log(`✅ Database updated successfully for content entry ${session.contentEntryId}`);
+        
+        // Mark session as completed
+        session.status = 'completed';
+        session.progress = 100;
+        session.finalUrl = finalUrl;
+        session.bunnyVideoId = bunnyVideoId;
+        session.completedAt = new Date().toISOString();
+        session.lastUpdate = new Date().toISOString();
+        session.steps.databaseUpdate = true;
+        
+        console.log(`✅ Upload completed: ${sessionId} - ${finalUrl}`);
+        
+        return res.json({
+          success: true,
+          sessionId,
+          session,
+          message: 'Upload completed and database updated successfully'
+        });
+        
+      } catch (dbError) {
+        console.error(`❌ Database error:`, dbError);
+        
+        // Update session with error but don't fail the response
+        session.error = `Database error: ${dbError.message}`;
+        session.status = 'failed';
+        session.lastUpdate = new Date().toISOString();
+        
+        return res.status(500).json({
+          success: false,
+          error: 'Database update failed',
+          details: dbError.message,
+          sessionId
+        });
+      }
+    } else {
+      // Just mark session as completed without database update
+      session.status = 'completed';
+      session.progress = 100;
+      session.finalUrl = finalUrl || '[COMPLETED]';
+      session.bunnyVideoId = bunnyVideoId;
+      session.completedAt = new Date().toISOString();
+      session.lastUpdate = new Date().toISOString();
+      
+      console.log(`✅ Session marked as completed: ${sessionId}`);
+      
+      return res.json({
+        success: true,
+        sessionId,
+        session,
+        message: 'Upload session completed'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error completing upload:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to complete upload'
+    });
+  }
+});
+
+// Helper function to create Bunny CDN upload credentials
+async function createBunnyCredentials(filename) {
+  const BUNNY_LIBRARY_ID = process.env.BUNNY_LIBRARY_ID;
+  const BUNNY_API_KEY = process.env.BUNNY_API_KEY;
+  
+  if (!BUNNY_LIBRARY_ID || !BUNNY_API_KEY) {
+    throw new Error('Bunny CDN not configured - missing BUNNY_LIBRARY_ID or BUNNY_API_KEY');
+  }
+  
+  console.log('📋 Creating Bunny video entry for:', filename);
+  console.log('🔧 Bunny API URL:', `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`);
+  
+  // Use global fetch if available (Node 18+) or require node-fetch
+  const fetch = globalThis.fetch || require('node-fetch');
+  
+  // Create video entry in Bunny CDN
+  const createRes = await fetch(
+    `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`,
+    {
+      method: 'POST',
+      headers: {
+        'AccessKey': String(BUNNY_API_KEY),
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        title: filename,
+      }),
+    }
+  );
+
+  const createResText = await createRes.text();
+  console.log('🐰 Bunny create response status:', createRes.status);
+
+  if (!createRes.ok) {
+    console.error('❌ Bunny CDN API Error:', createRes.status, createResText);
+    throw new Error(`Bunny CDN Error (${createRes.status}): ${createResText}`);
+  }
+
+  let videoData;
+  try {
+    videoData = JSON.parse(createResText);
+  } catch (parseError) {
+    console.error('Failed to parse Bunny response:', parseError);
+    throw new Error(`Failed to parse Bunny response: ${createResText}`);
+  }
+
+  if (!videoData.guid) {
+    throw new Error(`Bunny response missing videoId: ${createResText}`);
+  }
+
+  const videoId = videoData.guid;
+  const uploadUrl = `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoId}`;
+
+  console.log('✅ Bunny video entry created:', videoId);
+
+  return {
+    success: true,
+    videoId: videoId,
+    uploadUrl: uploadUrl,
+    libraryId: BUNNY_LIBRARY_ID,
+    headers: {
+      'AccessKey': BUNNY_API_KEY,
+      'Content-Type': 'application/octet-stream'
+    },
+    message: 'Direct upload credentials ready'
+  };
+}
+
+// GET /api/admin/upload-tracking/credentials/:sessionId - Get upload credentials for a session
+router.get('/credentials/:sessionId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId } = req.params;
+    
+    console.log(`🔑 Getting upload credentials for session: ${sessionId}`);
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Upload session not found',
+        sessionId
+      });
+    }
+    
+    console.log(`✅ Found session for ${session.filename} (Content Entry ID: ${session.contentEntryId})`);
+    
+    try {
+      // Create Bunny CDN upload credentials directly
+      const credentialsData = await createBunnyCredentials(session.filename);
+      
+      console.log(`✅ Got upload credentials for ${session.filename}`);
+      
+      // Update session with credentials step and Bunny info
+      session.steps.credentials = true;
+      session.bunnyVideoId = credentialsData.videoId;
+      session.bunnyUploadUrl = credentialsData.uploadUrl;
+      session.lastUpdate = new Date().toISOString();
+      
+      return res.json({
+        success: true,
+        sessionId,
+        filename: session.filename,
+        contentEntryId: session.contentEntryId,
+        credentials: credentialsData,
+        message: 'Upload credentials retrieved successfully'
+      });
+      
+    } catch (credentialsError) {
+      console.error(`❌ Error creating upload credentials:`, credentialsError);
+      
+      // Update session with error
+      session.error = `Credentials error: ${credentialsError.message}`;
+      session.lastUpdate = new Date().toISOString();
+      
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to get upload credentials',
+        details: credentialsError.message,
+        sessionId
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error in credentials endpoint:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to process credentials request'
     });
   }
 });
