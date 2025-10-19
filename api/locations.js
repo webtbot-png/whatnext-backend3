@@ -13,7 +13,7 @@ function logContentByLocation(contentEntries, dbLocations) {
   for (const content of contentEntries) {
     const locId = content.location_id;
     if (!contentByLocation[locId]) {
-      const location = dbLocations.find(l => l.id === locId);
+      const location = dbLocations.find(l => l.id === locId); 
       contentByLocation[locId] = {
         locationName: location?.name || 'Unknown',
         countryISO3: location?.country_iso3 || 'Unknown',
