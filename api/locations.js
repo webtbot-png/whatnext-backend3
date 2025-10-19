@@ -13,7 +13,7 @@ function logContentByLocation(contentEntries, dbLocations) {
   for (const content of contentEntries) {
     const locId = content.location_id;
     if (!contentByLocation[locId]) {
-      const location = dbLocations.find(l => l.id === locId); 
+      const location = dbLocations.find(l => l.id === locId);
       contentByLocation[locId] = {
         locationName: location?.name || 'Unknown',
         countryISO3: location?.country_iso3 || 'Unknown',
@@ -29,7 +29,8 @@ function logContentByLocation(contentEntries, dbLocations) {
   
   for (const [, data] of Object.entries(contentByLocation)) {
     console.log(`📍 ${data.locationName} (${data.countryISO3}):`);
-    for (const [i, video] of data.videos.entries()) {
+    for (let i = 0; i < data.videos.length; i++) {
+      const video = data.videos[i];
       console.log(`   ${i+1}. "${video.title}" - ${video.status}`);
       console.log(`      URL: ${video.url?.substring(0, 60)}...`);
     }
@@ -189,7 +190,8 @@ router.get('/', async (req, res) => {
       .filter(Boolean); // Remove nulls
     
     console.log('\n=== FINAL LOCATIONS BEING SENT TO MAP ===');
-    for (const [i, l] of locations.entries()) {
+    for (let i = 0; i < locations.length; i++) {
+      const l = locations[i];
       console.log(`${i+1}. "${l.name}" (${l.countryISO3}) - [${l.lng}, ${l.lat}] - ${l.mediaCount} videos`);
     }
     
