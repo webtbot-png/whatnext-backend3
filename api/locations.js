@@ -36,25 +36,67 @@ function logContentByLocation(contentEntries, dbLocations) {
   }
 }
 
-// Helper function to format media data from content entries
+// Helper function to format media data from content entries - organized by folders/batches
 function formatMediaData(locationContent) {
-  return locationContent.map((content) => ({
-    id: content.id,
-    type: content.content_type || 'video',
-    url: content.media_url || '',
-    title: content.title || 'Untitled',
-    description: content.description || '',
-    thumbnail: content.thumbnail_url || '',
-    duration: content.duration || undefined,
-    isFeatured: content.is_featured || false,
-    viewCount: content.view_count || 0,
-    tags: content.tags || [],
-    createdAt: content.created_at,
-    metadata: {
-      originalTitle: content.title,
-      uploadedAt: content.created_at
+  // Group content by batch_id if present, otherwise by extracted folder name
+  const batchGroups = {};
+  for (const content of locationContent) {
+    // Use batch_id if present, otherwise use folder name from title
+    const folderKey = content.batch_id || extractFolderName(content.title) || 'individual-' + content.id;
+    if (!batchGroups[folderKey]) {
+      batchGroups[folderKey] = {
+        id: content.batch_id || folderKey,
+        type: 'folder',
+        title: extractFolderName(content.title) || 'Untitled Folder',
+        description: content.description?.split(' - Part ')[0] || 'Video collection',
+        thumbnail: content.thumbnail_url || '',
+        isFeatured: false,
+        createdAt: content.created_at,
+        videoCount: 0,
+        totalDuration: 0,
+        videos: []
+      };
     }
-  }));
+    batchGroups[folderKey].videos.push({
+      id: content.id,
+      type: content.content_type || 'video',
+      url: content.media_url || '',
+      title: content.title || 'Untitled',
+      description: content.description || '',
+      thumbnail: content.thumbnail_url || '',
+      duration: content.duration || 0,
+      isFeatured: content.is_featured || false,
+      viewCount: content.view_count || 0,
+      tags: content.tags || [],
+      createdAt: content.created_at,
+      partNumber: extractPartNumber(content.title)
+    });
+    batchGroups[folderKey].videoCount++;
+    batchGroups[folderKey].totalDuration += Number.parseInt(content.duration || 0);
+    if (!batchGroups[folderKey].thumbnail && content.thumbnail_url) {
+      batchGroups[folderKey].thumbnail = content.thumbnail_url;
+    }
+  }
+  // Convert to array and sort videos within each folder by part number
+  const folders = Object.values(batchGroups);
+  for (const folder of folders) {
+    folder.videos.sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+  }
+  return folders;
+}
+
+// Helper function to extract folder name from video title (e.g., "The First Stream - Part 1" -> "The First Stream")
+function extractFolderName(title) {
+  if (!title) return null;
+  const match = title.match(/^(.+?)\s*-\s*Part\s+\d+/i);
+  return match ? match[1].trim() : title;
+}
+
+// Helper function to extract part number from video title
+function extractPartNumber(title) {
+  if (!title) return 0;
+  const match = title.match(/Part\s+(\d+)/i);
+  return match ? Number.parseInt(match[1]) : 0;
 }
 
 // Helper function to format location object
