@@ -1027,13 +1027,17 @@ router.post('/complete', async (req, res) => {
     session.bunnyVideoId = bunnyVideoId;
     session.completedAt = new Date().toISOString();
     session.lastUpdate = new Date().toISOString();
+    // Convert the final URL to iframe format if it's a video
+    const iframeUrl = convertToIframeUrl(finalUrl, bunnyVideoId);
+    console.log(`🔄 Converting URL format:`);
+    console.log(`   Original: ${finalUrl}`);
+    console.log(`   Iframe: ${iframeUrl}`);
+    
+    // Update database with the final URL (re-enabled since URL format is confirmed working)
+    await updateDatabaseWithFinalUrl(session, iframeUrl);
     session.steps.databaseUpdate = true;
     
-    console.log(`✅ Upload session completed: ${sessionId} - ${finalUrl}`);
-    
-    // NOTE: Database update with finalUrl temporarily disabled to preserve working video URLs
-    // The videos were working before this change - need to investigate finalUrl format
-    // TODO: Re-enable once finalUrl format is confirmed to be correct
+    console.log(`✅ Upload session completed: ${sessionId} - ${iframeUrl}`);
     
     // Clean up session after 1 hour
     setTimeout(() => {
