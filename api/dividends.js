@@ -382,6 +382,131 @@ router.post('/admin/trigger-claim', async (req, res) => {
   }
 });
 
+// Admin endpoint to get current settings
+router.get('/admin/settings', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdminClient();
+    
+    const { data: settings, error } = await supabase
+      .from('auto_claim_settings')
+      .select('*')
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') { // PGRST116 is "not found" for single()
+      console.error('Error fetching settings:', error);
+      return res.status(500).json({ error: 'Failed to fetch settings' });
+    }
+
+    // Return default settings if none exist
+    const defaultSettings = {
+      enabled: false,
+      claim_interval_minutes: 10,
+      distribution_percentage: 30,
+      min_claim_amount: 0.001
+    };
+
+    res.json(settings || defaultSettings);
+  } catch (error) {
+    console.error('Error in settings GET endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin endpoint to update settings (POST version for DividendsTab compatibility)
+router.post('/admin/settings', async (req, res) => {
+  try {
+    const { 
+      enabled, 
+      claim_interval_minutes, 
+      distribution_percentage,
+      min_claim_amount 
+    } = req.body;
+
+    const supabase = getSupabaseAdminClient();
+
+    const { data, error } = await supabase
+      .from('auto_claim_settings')
+      .upsert({
+        id: 1, // Use fixed ID for single settings record
+        enabled,
+        claim_interval_minutes,
+        distribution_percentage,
+        min_claim_amount
+      });
+
+    if (error) {
+      console.error('Error updating settings:', error);
+      return res.status(500).json({ error: 'Failed to update settings' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Settings updated successfully',
+      data
+    });
+  } catch (error) {
+    console.error('Error in settings POST endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Admin endpoint to get dividend statistics
+router.get('/admin/stats', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdminClient();
+
+    // Get total claims and distributed amount
+    const { data: claimsData, error: claimsError } = await supabase
+      .from('dividend_claims')
+      .select('claimed_amount, distribution_amount');
+
+    if (claimsError) {
+      console.error('Error fetching claims data:', claimsError);
+      return res.status(500).json({ error: 'Failed to fetch claims data' });
+    }
+
+    // Calculate stats
+    const totalClaims = claimsData?.length || 0;
+    const totalDistributed = claimsData?.reduce((sum, claim) => sum + Number.parseFloat(claim.claimed_amount || 0), 0) || 0;
+
+    // Get unique holders count
+    const { count: uniqueHolders, error: holdersError } = await supabase
+      .from('dividend_claims')
+      .select('user_address', { count: 'exact', head: true });
+
+    if (holdersError) {
+      console.error('Error fetching holders count:', holdersError);
+    }
+
+    // Get last claim date
+    const { data: lastClaim, error: lastClaimError } = await supabase
+      .from('dividend_claims')
+      .select('claim_timestamp')
+      .order('claim_timestamp', { ascending: false })
+      .limit(1)
+      .single();
+
+    // Get next scheduled claim from settings
+    const { data: settings, error: settingsError } = await supabase
+      .from('auto_claim_settings')
+      .select('next_claim_scheduled')
+      .limit(1)
+      .single();
+
+    res.json({
+      total_claims: totalClaims,
+      total_distributed: totalDistributed,
+      unique_holders: uniqueHolders || 0,
+      last_claim_date: lastClaim?.claim_timestamp || null,
+      next_claim_scheduled: settings?.next_claim_scheduled || null
+    });
+  } catch (error) {
+    console.error('Error in stats endpoint:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Admin endpoint to update settings (protected)
 router.put('/admin/settings', async (req, res) => {
   try {
