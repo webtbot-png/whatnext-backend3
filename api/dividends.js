@@ -5,6 +5,25 @@ const { getCronStatus, startDividendCron, stopDividendCron } = require('./servic
 
 const router = express.Router();
 
+// DEBUG: Log that dividends router is being initialized
+console.log('🎯 Dividends router initializing...');
+console.log('📦 Required modules:');
+console.log('   - express:', typeof express);
+console.log('   - getSupabaseAdminClient:', typeof getSupabaseAdminClient);
+console.log('   - triggerManualClaim:', typeof triggerManualClaim);
+console.log('   - getAutoClaimSettings:', typeof getAutoClaimSettings);
+console.log('   - getCronStatus:', typeof getCronStatus);
+
+// TEST ENDPOINT - If this works, router is loaded
+router.get('/test', (req, res) => {
+  console.log('🎯 Dividends /test endpoint hit!');
+  res.json({
+    message: 'Dividends router is working!',
+    timestamp: new Date().toISOString(),
+    routerLoaded: true
+  });
+});
+
 // Helper function to fetch dividend claims data
 async function getDividendClaimsData(supabase) {
   const { data: latestClaim, error: claimError } = await supabase
@@ -101,12 +120,19 @@ async function getRealTokenData(supabase, totalDistributed) {
 
 // Get dividend status and overview data
 router.get('/status', async (req, res) => {
+  console.log('🎯 Dividends /status endpoint hit!');
   try {
+    console.log('🔄 Attempting to get Supabase client...');
     const supabase = getSupabaseAdminClient();
+    console.log('✅ Got Supabase client');
     
     // Fetch all required data using helper functions
+    console.log('🔄 Fetching dividend claims data...');
     const { latestClaim, totalStats, claimHistory } = await getDividendClaimsData(supabase);
+    console.log('✅ Fetched claims data');
+    
     const { settings, holderCount } = await getSettingsAndHolders(supabase);
+    console.log('✅ Fetched settings and holders');
 
     // Calculate totals
     const totalClaimed = totalStats?.reduce((sum, claim) => sum + Number.parseFloat(claim.claimed_amount || 0), 0) || 0;
