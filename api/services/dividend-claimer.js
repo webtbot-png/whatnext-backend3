@@ -35,17 +35,37 @@ async function getAutoClaimSettings() {
   const { data, error } = await supabase
     .from('auto_claim_settings')
     .select('*')
-    .limit(1);
+    .eq('id', '550e8400-e29b-41d4-a716-446655440000')
+    .single();
     
   if (error) {
-    throw new Error('Failed to fetch auto-claim settings: ' + error.message);
+    if (error.code === 'PGRST116') { // Not found
+      // Create default settings
+      const defaultSettings = {
+        id: '550e8400-e29b-41d4-a716-446655440000',
+        enabled: false,
+        claim_interval_minutes: 10,
+        distribution_percentage: 30,
+        min_claim_amount: 0.001
+      };
+      
+      const { data: newData, error: insertError } = await supabase
+        .from('auto_claim_settings')
+        .insert(defaultSettings)
+        .select()
+        .single();
+        
+      if (insertError) {
+        throw new Error('Failed to create default auto-claim settings: ' + insertError.message);
+      }
+      
+      return newData;
+    } else {
+      throw new Error('Failed to fetch auto-claim settings: ' + error.message);
+    }
   }
   
-  if (data && data.length > 0) {
-    return data[0];
-  } else {
-    throw new Error('No auto-claim settings found');
-  }
+  return data;
 }
 
 /**
