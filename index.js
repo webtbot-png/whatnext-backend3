@@ -254,32 +254,18 @@ const mountRoutes = () => {
 
     console.log(`✅ Successfully loaded ${loadedRoutes.count} API routes`);
     
-    // Specific check for dividends route
-    console.log(`🔍 Checking dividends route specifically...`);
-    try {
-      const fs = require('node:fs');
-      const path = require('node:path');
-      const dividendsPath = path.resolve('./api/dividends.js');
-      console.log(`📁 Dividends file path: ${dividendsPath}`);
-      
-      if (fs.existsSync(dividendsPath)) {
-        console.log(`✅ Dividends file exists`);
-        
-        // Try to read first few lines
-        const content = fs.readFileSync(dividendsPath, 'utf8').substring(0, 200);
-        console.log(`📄 First 200 chars of dividends.js:`);
-        console.log(content);
-        
-        const dividendsRouter = require('./api/dividends.js');
-        console.log(`✅ Dividends router module loaded successfully`);
-        console.log(`📋 Dividends router has ${dividendsRouter.stack?.length || 'unknown'} routes`);
-      } else {
-        console.log(`❌ Dividends file does not exist at: ${dividendsPath}`);
-      }
-    } catch (error) {
-      console.log(`❌ Dividends router failed to load:`, error.message);
-      console.log(`   Error type: ${error.constructor.name}`);
-      console.log(`   Stack:`, error.stack);
+    // CRITICAL: Force load dividends router and fail if it doesn't work
+    console.log(`🔍 FORCE LOADING dividends route...`);
+    const dividendsRoute = { path: '/api/dividends', file: './api/dividends.js' };
+    const dividendsLoaded = loadRoute(dividendsRoute, loadedRoutes, 'CRITICAL ');
+    
+    if (dividendsLoaded === false) {
+      console.error(`🚨🚨🚨 CRITICAL ERROR: Dividends router failed to load! 🚨🚨🚨`);
+      console.error(`   This will cause the frontend to show no dividend data`);
+      console.error(`   Check the dividends.js file and its dependencies`);
+      // Don't throw error - let server start but log the critical issue
+    } else {
+      console.log(`✅ Dividends router loaded successfully`);
     }
     
   } catch (error) {
