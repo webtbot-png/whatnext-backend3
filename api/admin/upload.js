@@ -10,48 +10,39 @@ const fetch = globalThis.fetch || require('node-fetch');
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
 
-// Security: Allowed file extensions for uploads
-const ALLOWED_EXTENSIONS = ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.jpg', '.jpeg', '.png', '.gif', '.webp'];
+// Security: Allowed file extensions for uploads (SonarQube S2598 compliance)
+const ALLOWED_EXTENSIONS = new Set(['.mp4', '.avi', '.mov', '.webm', '.mkv', '.jpg', '.jpeg', '.png', '.gif', '.webp']);
 
 // Security: Allowed MIME types for uploads
-const ALLOWED_MIME_TYPES = [
+const ALLOWED_MIME_TYPES = new Set([
   'video/mp4', 'video/avi', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/x-matroska',
   'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'
-];
+]);
 
 /**
- * Security function to validate file extension and MIME type
- * Explicitly checks file extensions to satisfy security linting
+ * SECURITY FUNCTION: Explicitly validates file extension and MIME type (SonarQube S2598)
+ * This function restricts file extensions for uploaded files to prevent security vulnerabilities
+ * @param {string} originalFilename - The original filename from the upload
+ * @param {string} mimetype - The MIME type from the upload
+ * @returns {boolean} - True if file type is allowed, false otherwise
  */
-function isAllowedFileType(originalFilename, mimetype) {
-  if (originalFilename === undefined || originalFilename === null || mimetype === undefined || mimetype === null) {
-    return { allowed: false, reason: 'Missing filename or mimetype' };
+function validateUploadedFileType(originalFilename, mimetype) {
+  // SECURITY: Reject files without required parameters
+  if (!originalFilename || !mimetype) {
+    return false;
   }
-  
-  const extension = originalFilename.toLowerCase().substring(originalFilename.lastIndexOf('.'));
-  
-  // Explicit extension checking for security compliance
-  const isValidExtension = (
-    extension === '.mp4' || extension === '.avi' || extension === '.mov' || 
-    extension === '.webm' || extension === '.mkv' || extension === '.jpg' || 
-    extension === '.jpeg' || extension === '.png' || extension === '.gif' || 
-    extension === '.webp'
-  );
-  
-  const hasValidMimetype = ALLOWED_MIME_TYPES.includes(mimetype.toLowerCase());
-  
-  if (!isValidExtension) {
-    return { allowed: false, reason: `Invalid extension: ${extension}. Allowed: ${ALLOWED_EXTENSIONS.join(', ')}` };
-  }
-  
-  if (!hasValidMimetype) {
-    return { allowed: false, reason: `Invalid MIME type: ${mimetype}. Allowed: ${ALLOWED_MIME_TYPES.join(', ')}` };
-  }
-  
-  return { allowed: true, reason: 'Valid file type' };
-}
 
-function verifyAdminToken(req) {
+  // SECURITY: Extract file extension
+  const extension = originalFilename.toLowerCase().substring(originalFilename.lastIndexOf('.'));
+
+  // SECURITY: Check if extension is in allowed set (SonarQube S7776 compliance)
+  const isValidExtension = ALLOWED_EXTENSIONS.has(extension);
+
+  // SECURITY: Check if MIME type is in allowed set (SonarQube S7776 compliance)
+  const hasValidMimetype = ALLOWED_MIME_TYPES.has(mimetype.toLowerCase());
+
+  return isValidExtension && hasValidMimetype;
+}function verifyAdminToken(req) {
   console.log('🔐 Verifying admin token for upload...');
   console.log('Authorization header:', req.headers.authorization);
   const authHeader = req.headers.authorization;
@@ -418,8 +409,8 @@ router.get('/test', (req, res) => {
             // Security: File extension restriction for safety
             if (!originalFilename) return false;
             const ext = path.extname(originalFilename).toLowerCase();
-            const isValidExt = ALLOWED_EXTENSIONS.includes(ext);
-            const isValidMime = ALLOWED_MIME_TYPES.includes(mimetype);
+            const isValidExt = ALLOWED_EXTENSIONS.has(ext);
+            const isValidMime = ALLOWED_MIME_TYPES.has(mimetype);
             return isValidExt && isValidMime;
           }
         });
@@ -640,22 +631,9 @@ async function handleUpload(req, res) {
       maxFieldsSize: 2 * 1024 * 1024, // 2MB for fields
       hashAlgorithm: false,
       filter: function ({name, originalFilename, mimetype}) {
-        // Security compliance: Explicit file extension validation
-        if (!originalFilename || !mimetype) return false;
-        
-        const ext = path.extname(originalFilename).toLowerCase();
-        
-        // Explicit check for each allowed extension (security requirement)
-        const isAllowedExtension = (
-          ext === '.mp4' || ext === '.avi' || ext === '.mov' || 
-          ext === '.webm' || ext === '.mkv' || ext === '.jpg' || 
-          ext === '.jpeg' || ext === '.png' || ext === '.gif' || 
-          ext === '.webp'
-        );
-        
-        const isAllowedMimeType = ALLOWED_MIME_TYPES.includes(mimetype);
-        
-        return isAllowedExtension && isAllowedMimeType;
+        // SECURITY: Explicit file extension validation for SonarQube S2598 compliance
+        // This restricts uploaded files to allowed extensions only
+        return validateUploadedFileType(originalFilename, mimetype);
       }
     });
     console.log('✅ Formidable configured successfully');
