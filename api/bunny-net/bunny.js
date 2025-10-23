@@ -3,9 +3,10 @@ const formidable = require('formidable');
 const fs = require('node:fs');
 const path = require('node:path');
 
-
-const ALLOWED_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.mpeg', '.mpg'];
-const ALLOWED_MIME_TYPES = [ 
+// SECURITY: Explicitly restrict file extensions for uploaded files (SonarQube S2598 compliance)
+// Only video files are allowed to prevent malicious file uploads
+const ALLOWED_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.mpeg', '.mpg']);
+const ALLOWED_MIME_TYPES = new Set([
   'video/mp4',
   'video/quicktime',
   'video/x-msvideo',
@@ -13,10 +14,36 @@ const ALLOWED_MIME_TYPES = [
   'video/webm',
   'video/x-flv',
   'video/mpeg'
-];
+]);
 
+/**
+ * SECURITY FUNCTION: Validates file extension and MIME type to prevent malicious uploads
+ * This function explicitly checks file extensions as required by SonarQube S2598
+ * @param {string} filename - The original filename from the upload
+ * @param {string} mimetype - The MIME type from the upload
+ * @returns {boolean} - True if file is allowed, false otherwise
+ */
+function isFileExtensionAllowed(filename, mimetype) {
+  // SECURITY: Reject files without filename or mimetype
+  if (!filename || !mimetype) {
+    return false;
+  }
 
-// SonarQube: File extension and MIME type are restricted below (see ALLOWED_EXTENSIONS and ALLOWED_MIME_TYPES)
+  // SECURITY: Extract and validate file extension
+  const fileExt = filename.toLowerCase().match(/\.\w+$/)?.[0];
+  if (!fileExt) {
+    return false; // No extension found
+  }
+
+  // SECURITY: Check if extension is in allowed set (SonarQube S7776 compliance)
+  const isExtensionAllowed = ALLOWED_EXTENSIONS.has(fileExt);
+  const isMimeTypeAllowed = ALLOWED_MIME_TYPES.has(mimetype);
+
+  // SECURITY: Both extension and MIME type must be allowed
+  return isExtensionAllowed && isMimeTypeAllowed;
+}
+
+// SonarQube S2598: File extension and MIME type are restricted below (see ALLOWED_EXTENSIONS and ALLOWED_MIME_TYPES)
 function createSecureFormParser(uploadDir) {
   return formidable({
     maxFileSize: 5 * 1024 * 1024 * 1024, // 5GB
@@ -26,21 +53,8 @@ function createSecureFormParser(uploadDir) {
     maxFields: 0,
     maxFiles: 1,
     filter: function ({ name, originalFilename, mimetype }) {
-      // Explicit SonarQube-compliant check
-      if (originalFilename) {
-        const fileExt = originalFilename.toLowerCase().match(/\.\w+$/) && originalFilename.toLowerCase().match(/\.\w+$/)[0];
-        if (!fileExt || !ALLOWED_EXTENSIONS.includes(fileExt)) {
-          console.log('❌ Blocked file - Extension:', fileExt, 'MIME:', mimetype);
-          return false;
-        }
-      } else {
-        return false;
-      }
-      if (mimetype && !ALLOWED_MIME_TYPES.includes(mimetype)) {
-        console.log('❌ Blocked file - Extension:', originalFilename, 'MIME:', mimetype);
-        return false;
-      }
-      return true;
+      // SECURITY: Use explicit validation function for SonarQube compliance
+      return isFileExtensionAllowed(originalFilename, mimetype);
     }
   });
 }
@@ -71,13 +85,13 @@ router.post('/', async function (req, res) {
           return res.status(400).json({ error: 'No file uploaded' });
         }
         const fileExt = fileObj.originalFilename ? fileObj.originalFilename.toLowerCase().match(/\.\w+$/) && fileObj.originalFilename.toLowerCase().match(/\.\w+$/)[0] : '';
-        if (!ALLOWED_EXTENSIONS.includes(fileExt)) {
+        if (!ALLOWED_EXTENSIONS.has(fileExt)) {
           fs.unlinkSync(fileObj.filepath);
-          return res.status(400).json({ error: 'Invalid file type. Only video files are allowed.', allowedTypes: ALLOWED_EXTENSIONS.join(', ') });
+          return res.status(400).json({ error: 'Invalid file type. Only video files are allowed.', allowedTypes: Array.from(ALLOWED_EXTENSIONS).join(', ') });
         }
-        if (fileObj.mimetype && !ALLOWED_MIME_TYPES.includes(fileObj.mimetype)) {
+        if (fileObj.mimetype && !ALLOWED_MIME_TYPES.has(fileObj.mimetype)) {
           fs.unlinkSync(fileObj.filepath);
-          return res.status(400).json({ error: 'Invalid file MIME type.', allowedTypes: ALLOWED_MIME_TYPES.join(', ') });
+          return res.status(400).json({ error: 'Invalid file MIME type.', allowedTypes: Array.from(ALLOWED_MIME_TYPES).join(', ') });
         }
         console.log('📁 File:', fileObj.originalFilename, 'Size:', (fileObj.size / 1024 / 1024).toFixed(2), 'MB');
 
