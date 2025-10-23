@@ -5,7 +5,7 @@ const path = require('node:path');
 
 
 const ALLOWED_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.mpeg', '.mpg'];
-const ALLOWED_MIME_TYPES = [
+const ALLOWED_MIME_TYPES = [ 
   'video/mp4',
   'video/quicktime',
   'video/x-msvideo',
