@@ -41,11 +41,11 @@ async function getAutoClaimSettings() {
     throw new Error('Failed to fetch auto-claim settings: ' + error.message);
   }
   
-  if (!data || data.length === 0) {
+  if (data && data.length > 0) {
+    return data[0];
+  } else {
     throw new Error('No auto-claim settings found');
   }
-  
-  return data[0];
 }
 
 /**
@@ -265,129 +265,151 @@ async function createDividendDistributions(claimId, holders, distributionAmount)
 }
 
 /**
+ * Check if dividend claim should be processed
+ */
+function shouldProcessClaim(settings, forceRun) {
+  if (!settings.enabled && !forceRun) {
+    console.log('⏸️ Auto-claim is disabled');
+    return { shouldProcess: false, reason: 'Auto-claim disabled' };
+  }
+
+  const now = new Date();
+  const nextClaimTime = new Date(settings.next_claim_scheduled);
+
+  if (now < nextClaimTime && !forceRun) {
+    console.log(`⏰ Next claim scheduled for: ${nextClaimTime.toISOString()}`);
+    return {
+      shouldProcess: false,
+      reason: 'Not time for next claim',
+      nextClaimTime: nextClaimTime.toISOString()
+    };
+  }
+
+  return { shouldProcess: true };
+}
+
+/**
+ * Process successful fee claim and create distributions
+ */
+async function processSuccessfulClaim(settings, claimResult, supabase, now) {
+  // Calculate distribution amount
+  const distributionAmount = claimResult.claimedAmount * (settings.distribution_percentage / 100);
+
+  console.log(`💰 Claimed: ${claimResult.claimedAmount} SOL`);
+  console.log(`📊 Distribution (${settings.distribution_percentage}%): ${distributionAmount} SOL`);
+
+  // Get current token holders
+  const holderData = await getTokenHolders(settings.token_mint_address);
+
+  // Create claim record
+  const { data: claimRecord, error: claimError } = await supabase
+    .from('dividend_claims')
+    .insert({
+      claimed_amount: claimResult.claimedAmount,
+      transaction_id: claimResult.transactionId,
+      distribution_amount: distributionAmount,
+      total_supply: holderData.totalSupply,
+      holder_count: holderData.holders.length,
+      status: 'processing'
+    })
+    .select()
+    .single();
+
+  if (claimError) {
+    throw new Error('Failed to create claim record: ' + claimError.message);
+  }
+
+  const claimId = claimRecord.id;
+  console.log(`✅ Created claim record: ${claimId}`);
+
+  try {
+    // Save holder snapshot
+    await saveHolderSnapshot(claimId, holderData.holders);
+
+    // Create dividend distributions
+    await createDividendDistributions(claimId, holderData.holders, distributionAmount);
+
+    // Update holder stats
+    await updateHolderStats(holderData.holders, claimId, distributionAmount);
+
+    // Update claim status to completed
+    await supabase
+      .from('dividend_claims')
+      .update({ status: 'completed' })
+      .eq('id', claimId);
+
+    // Schedule next claim
+    const nextClaim = new Date(now.getTime() + settings.claim_interval_minutes * 60 * 1000);
+    await supabase
+      .from('auto_claim_settings')
+      .update({
+        last_successful_claim: now.toISOString(),
+        next_claim_scheduled: nextClaim.toISOString()
+      })
+      .eq('id', settings.id);
+
+    console.log(`✅ Dividend claim process completed successfully`);
+    console.log(`⏰ Next claim scheduled for: ${nextClaim.toISOString()}`);
+
+    return {
+      success: true,
+      claimId,
+      claimedAmount: claimResult.claimedAmount,
+      distributionAmount,
+      holdersCount: holderData.holders.length,
+      transactionId: claimResult.transactionId,
+      nextClaimTime: nextClaim.toISOString()
+    };
+
+  } catch (error) {
+    // Mark claim as failed
+    await supabase
+      .from('dividend_claims')
+      .update({
+        status: 'failed',
+        error_message: error.message
+      })
+      .eq('id', claimId);
+
+    throw error;
+  }
+}
+
+/**
  * Process a complete dividend claim and distribution cycle
  */
 async function processDividendClaim(forceRun = false) {
   try {
     console.log('🚀 Starting dividend claim process...');
-    
+
     // Get settings
     const settings = await getAutoClaimSettings();
-    
-    if (!settings.enabled && !forceRun) {
-      console.log('⏸️ Auto-claim is disabled');
+
+    // Check if we should process the claim
+    const claimCheck = shouldProcessClaim(settings, forceRun);
+    if (!claimCheck.shouldProcess) {
       return {
         success: false,
-        reason: 'Auto-claim disabled'
+        reason: claimCheck.reason,
+        ...(claimCheck.nextClaimTime && { nextClaimTime: claimCheck.nextClaimTime })
       };
     }
-    
-    // Check if it's time for next claim
-    const now = new Date();
-    const nextClaimTime = new Date(settings.next_claim_scheduled);
-    
-    if (now < nextClaimTime && !forceRun) {
-      console.log(`⏰ Next claim scheduled for: ${nextClaimTime.toISOString()}`);
-      return {
-        success: false,
-        reason: 'Not time for next claim',
-        nextClaimTime: nextClaimTime.toISOString()
-      };
-    }
-    
+
     // Start claim process
     const supabase = getSupabaseAdminClient();
-    
+    const now = new Date();
+
     // Claim fees from PumpFun
     const claimResult = await claimPumpFunFees(settings);
-    
+
     if (!claimResult.success) {
       console.log('❌ Fee claim failed:', claimResult.reason);
       return claimResult;
     }
-    
-    // Calculate distribution amount (30% of claimed fees)
-    const distributionAmount = claimResult.claimedAmount * (settings.distribution_percentage / 100);
-    
-    console.log(`💰 Claimed: ${claimResult.claimedAmount} SOL`);
-    console.log(`📊 Distribution (${settings.distribution_percentage}%): ${distributionAmount} SOL`);
-    
-    // Get current token holders
-    const holderData = await getTokenHolders(settings.token_mint_address);
-    
-    // Create claim record
-    const { data: claimRecord, error: claimError } = await supabase
-      .from('dividend_claims')
-      .insert({
-        claimed_amount: claimResult.claimedAmount,
-        transaction_id: claimResult.transactionId,
-        distribution_amount: distributionAmount,
-        total_supply: holderData.totalSupply,
-        holder_count: holderData.holders.length,
-        status: 'processing'
-      })
-      .select()
-      .single();
-      
-    if (claimError) {
-      throw new Error('Failed to create claim record: ' + claimError.message);
-    }
-    
-    const claimId = claimRecord.id;
-    console.log(`✅ Created claim record: ${claimId}`);
-    
-    try {
-      // Save holder snapshot
-      await saveHolderSnapshot(claimId, holderData.holders);
-      
-      // Create dividend distributions
-      await createDividendDistributions(claimId, holderData.holders, distributionAmount);
-      
-      // Update holder stats
-      await updateHolderStats(holderData.holders, claimId, distributionAmount);
-      
-      // Update claim status to completed
-      await supabase
-        .from('dividend_claims')
-        .update({ status: 'completed' })
-        .eq('id', claimId);
-      
-      // Schedule next claim
-      const nextClaim = new Date(now.getTime() + settings.claim_interval_minutes * 60 * 1000);
-      await supabase
-        .from('auto_claim_settings')
-        .update({ 
-          last_successful_claim: now.toISOString(),
-          next_claim_scheduled: nextClaim.toISOString()
-        })
-        .eq('id', settings.id);
-      
-      console.log(`✅ Dividend claim process completed successfully`);
-      console.log(`⏰ Next claim scheduled for: ${nextClaim.toISOString()}`);
-      
-      return {
-        success: true,
-        claimId,
-        claimedAmount: claimResult.claimedAmount,
-        distributionAmount,
-        holdersCount: holderData.holders.length,
-        transactionId: claimResult.transactionId,
-        nextClaimTime: nextClaim.toISOString()
-      };
-      
-    } catch (error) {
-      // Mark claim as failed
-      await supabase
-        .from('dividend_claims')
-        .update({ 
-          status: 'failed',
-          error_message: error.message 
-        })
-        .eq('id', claimId);
-      
-      throw error;
-    }
-    
+
+    // Process successful claim
+    return await processSuccessfulClaim(settings, claimResult, supabase, now);
+
   } catch (error) {
     console.error('❌ Dividend claim process failed:', error);
     throw error;
@@ -408,14 +430,14 @@ async function shouldRunClaim() {
   try {
     const settings = await getAutoClaimSettings();
     
-    if (!settings.enabled) {
+    if (settings.enabled) {
+      const now = new Date();
+      const nextClaimTime = new Date(settings.next_claim_scheduled);
+      
+      return now >= nextClaimTime;
+    } else {
       return false;
     }
-    
-    const now = new Date();
-    const nextClaimTime = new Date(settings.next_claim_scheduled);
-    
-    return now >= nextClaimTime;
   } catch (error) {
     console.error('Error checking if claim should run:', error);
     return false;
