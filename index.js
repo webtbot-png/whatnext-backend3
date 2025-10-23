@@ -65,7 +65,9 @@ app.use((req, res, next) => {
   }
   // Apply URL encoding to all other routes
   express.urlencoded({ extended: true, limit: '50gb' })(req, res, next);
-});// Health check
+});
+
+// Health check
 app.get('/', (req, res) => {
   res.json({
     status: 'OK',
