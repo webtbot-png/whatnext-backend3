@@ -1,7 +1,7 @@
 const express = require('express');
 const formidable = require('formidable');
-const fs = require('fs');
-const path = require('path');
+const fs = require('node:fs');
+const path = require('node:path');
 
 
 const ALLOWED_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.mpeg', '.mpg'];
