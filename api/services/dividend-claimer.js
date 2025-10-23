@@ -30,7 +30,9 @@ function decryptPrivateKey(encryptedKey, encryptionPassword) {
  * Get the current auto-claim settings
  */
 async function getAutoClaimSettings() {
+  console.log('🔄 getAutoClaimSettings called');
   const supabase = getSupabaseAdminClient();
+  console.log('✅ Got Supabase client in getAutoClaimSettings');
   
   const { data, error } = await supabase
     .from('auto_claim_settings')
@@ -39,7 +41,9 @@ async function getAutoClaimSettings() {
     .single();
     
   if (error) {
+    console.log('⚠️ Error fetching auto-claim settings:', error);
     if (error.code === 'PGRST116') { // Not found
+      console.log('🔄 Settings not found, creating default settings...');
       // Create default settings
       const defaultSettings = {
         id: '550e8400-e29b-41d4-a716-446655440000',
@@ -56,15 +60,18 @@ async function getAutoClaimSettings() {
         .single();
         
       if (insertError) {
+        console.error('❌ Failed to create default auto-claim settings:', insertError);
         throw new Error('Failed to create default auto-claim settings: ' + insertError.message);
       }
       
+      console.log('✅ Created default settings:', newData);
       return newData;
     } else {
       throw new Error('Failed to fetch auto-claim settings: ' + error.message);
     }
   }
   
+  console.log('✅ Found existing settings:', data);
   return data;
 }
 
