@@ -88,14 +88,38 @@ app.get('/health', (req, res) => {
 const loadRoute = (route, loadedRoutes, routeType = '') => {
   try {
     console.log(`🔄 Attempting to load ${routeType}route: ${route.path} from ${route.file}`);
-    const router = require(route.file);
-    app.use(route.path, router);
-    loadedRoutes.count++;
-    console.log(`✅ Successfully loaded ${routeType}route: ${route.path}`);
-    return true;
+    
+    // Check if file exists before requiring
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const fullPath = path.resolve(route.file);
+    console.log(`📁 Checking file path: ${fullPath}`);
+    
+    if (fs.existsSync(fullPath)) {
+      console.log(`✅ File exists, requiring...`);
+      const router = require(route.file);
+      console.log(`✅ Successfully required router module`);
+      
+      if (router) {
+        console.log(`📋 Router type: ${typeof router}`);
+        console.log(`📋 Router has stack: ${!!router.stack}`);
+        
+        app.use(route.path, router);
+        loadedRoutes.count++;
+        console.log(`✅ Successfully loaded ${routeType}route: ${route.path}`);
+        return true;
+      } else {
+        console.log(`❌ Router is null/undefined`);
+        return false;
+      }
+    } else {
+      console.log(`❌ File does not exist: ${fullPath}`);
+      return false;
+    }
   } catch (error) {
     console.log(`❌ FAILED to load ${routeType}route ${route.path}:`, error.message);
     console.log(`   File: ${route.file}`);
+    console.log(`   Error type: ${error.constructor.name}`);
     console.log(`   Stack:`, error.stack);
     return false;
   }
@@ -113,8 +137,7 @@ const getRouteDefinitions = () => {
   const workingRoutes = [
     { path: '/api/stats', file: './api/stats.js' },
     { path: '/api/locations', file: './api/locations.js' },
-    { path: '/api/debug', file: './api/debug.js' },
-    { path: '/api/dividends', file: './api/dividends.js' }
+    { path: '/api/debug', file: './api/debug.js' }
   ];
 
   const originalRoutes = [
@@ -134,6 +157,7 @@ const getRouteDefinitions = () => {
     { path: '/api/video-test', file: './api/video-test.js' },
     { path: '/api/claim-validation', file: './api/claim-validation.js' },
     { path: '/api/debug', file: './api/debug.js' },
+    { path: '/api/dividends', file: './api/dividends.js' },
     
     // Directory routes with index files
     { path: '/api/admin', file: './api/admin/index.js' },
@@ -231,11 +255,29 @@ const mountRoutes = () => {
     // Specific check for dividends route
     console.log(`🔍 Checking dividends route specifically...`);
     try {
-      const dividendsRouter = require('./api/dividends.js');
-      console.log(`✅ Dividends router module loaded successfully`);
-      console.log(`📋 Dividends router has ${dividendsRouter.stack?.length || 'unknown'} routes`);
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const dividendsPath = path.resolve('./api/dividends.js');
+      console.log(`📁 Dividends file path: ${dividendsPath}`);
+      
+      if (fs.existsSync(dividendsPath)) {
+        console.log(`✅ Dividends file exists`);
+        
+        // Try to read first few lines
+        const content = fs.readFileSync(dividendsPath, 'utf8').substring(0, 200);
+        console.log(`📄 First 200 chars of dividends.js:`);
+        console.log(content);
+        
+        const dividendsRouter = require('./api/dividends.js');
+        console.log(`✅ Dividends router module loaded successfully`);
+        console.log(`📋 Dividends router has ${dividendsRouter.stack?.length || 'unknown'} routes`);
+      } else {
+        console.log(`❌ Dividends file does not exist at: ${dividendsPath}`);
+      }
     } catch (error) {
       console.log(`❌ Dividends router failed to load:`, error.message);
+      console.log(`   Error type: ${error.constructor.name}`);
+      console.log(`   Stack:`, error.stack);
     }
     
   } catch (error) {
