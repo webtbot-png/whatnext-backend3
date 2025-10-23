@@ -87,13 +87,16 @@ app.get('/health', (req, res) => {
 // Helper function to load a single route
 const loadRoute = (route, loadedRoutes, routeType = '') => {
   try {
+    console.log(`🔄 Attempting to load ${routeType}route: ${route.path} from ${route.file}`);
     const router = require(route.file);
     app.use(route.path, router);
     loadedRoutes.count++;
-    console.log(`✅ Loaded ${routeType}route: ${route.path}`);
+    console.log(`✅ Successfully loaded ${routeType}route: ${route.path}`);
     return true;
   } catch (error) {
-    console.log(`⚠️ Could not load ${routeType}route ${route.path}:`, error.message);
+    console.log(`❌ FAILED to load ${routeType}route ${route.path}:`, error.message);
+    console.log(`   File: ${route.file}`);
+    console.log(`   Stack:`, error.stack);
     return false;
   }
 };
@@ -211,13 +214,30 @@ const mountRoutes = () => {
     const loadedRoutes = { count: 0 };
     const { workingRoutes, originalRoutes } = getRouteDefinitions();
     
+    console.log(`🚀 Starting route mounting process...`);
+    console.log(`📋 Working routes to load: ${workingRoutes.length}`);
+    console.log(`📋 Original routes to load: ${originalRoutes.length}`);
+    
     // Load working routes first
+    console.log(`🔄 Loading working routes...`);
     loadRoutesArray(workingRoutes, loadedRoutes, 'working ');
     
     // Load original routes
+    console.log(`🔄 Loading original routes...`);
     loadRoutesArray(originalRoutes, loadedRoutes, 'original ');
 
     console.log(`✅ Successfully loaded ${loadedRoutes.count} API routes`);
+    
+    // Specific check for dividends route
+    console.log(`🔍 Checking dividends route specifically...`);
+    try {
+      const dividendsRouter = require('./api/dividends.js');
+      console.log(`✅ Dividends router module loaded successfully`);
+      console.log(`📋 Dividends router has ${dividendsRouter.stack?.length || 'unknown'} routes`);
+    } catch (error) {
+      console.log(`❌ Dividends router failed to load:`, error.message);
+    }
+    
   } catch (error) {
     console.log('⚠️ Error during route mounting:', error.message);
   }
@@ -225,6 +245,15 @@ const mountRoutes = () => {
 
 // Mount all routes
 mountRoutes();
+
+// Add a test endpoint to verify dividends routes are mounted
+app.get('/api/test-dividends', (req, res) => {
+  res.json({
+    message: 'Dividends test endpoint',
+    timestamp: new Date().toISOString(),
+    dividendsRoutesMounted: true
+  });
+});
 
 // Serve static files from the React build
 const frontendPath = path.join(__dirname, '..', '..', 'dist');
