@@ -39,23 +39,15 @@ async function getDividendClaimsData(supabase) {
 
 // Helper function to fetch settings and holder data
 async function getSettingsAndHolders(supabase) {
-  const { data: settings, error: settingsError } = await supabase
+  const { data: settings } = await supabase
     .from('auto_claim_settings')
     .select('*')
     .limit(1);
 
-  if (settingsError) {
-    throw new Error('Failed to fetch settings');
-  }
-
-  const { count: holderCount, error: holderError } = await supabase
+  const { count: holderCount } = await supabase
     .from('holder_stats')
     .select('*', { count: 'exact', head: true })
     .gt('current_token_balance', 0);
-
-  if (holderError) {
-    throw new Error('Failed to fetch holder count');
-  }
 
   return { settings, holderCount };
 }
@@ -471,16 +463,12 @@ router.get('/admin/stats', async (req, res) => {
     const totalDistributed = claimsData?.reduce((sum, claim) => sum + Number.parseFloat(claim.claimed_amount || 0), 0) || 0;
 
     // Get unique holders count
-    const { count: uniqueHolders, error: holdersError } = await supabase
+    const { count: uniqueHolders } = await supabase
       .from('dividend_claims')
       .select('user_address', { count: 'exact', head: true });
 
-    if (holdersError) {
-      console.error('Error fetching holders count:', holdersError);
-    }
-
     // Get last claim date
-    const { data: lastClaim, error: lastClaimError } = await supabase
+    const { data: lastClaim } = await supabase
       .from('dividend_claims')
       .select('claim_timestamp')
       .order('claim_timestamp', { ascending: false })
@@ -488,7 +476,7 @@ router.get('/admin/stats', async (req, res) => {
       .single();
 
     // Get next scheduled claim from settings
-    const { data: settings, error: settingsError } = await supabase
+    const { data: settings } = await supabase
       .from('auto_claim_settings')
       .select('next_claim_scheduled')
       .limit(1)
