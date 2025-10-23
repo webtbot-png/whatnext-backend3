@@ -956,6 +956,164 @@ async function handleEcosystemAdmin(res) {
   }
 }
 
+// Helper function to log content by location
+function logContentByLocation(contentEntries, dbLocations) {
+  if (!contentEntries || contentEntries.length === 0) return;
+  console.log('\n=== CONTENT ENTRIES BY LOCATION ===');
+  const contentByLocation = {};
+  for (const content of contentEntries) {
+    const locId = content.location_id;
+    if (!contentByLocation[locId]) {
+      const location = dbLocations.find(l => l.id === locId);
+      contentByLocation[locId] = {
+        locationName: location?.name || 'Unknown',
+        countryISO3: location?.country_iso3 || 'Unknown',
+        videos: []
+      };
+    }
+    contentByLocation[locId].videos.push({
+      title: content.title,
+      url: content.media_url,
+      status: content.status
+    });
+  }
+  
+  for (const [, data] of Object.entries(contentByLocation)) {
+    console.log(`\n📍 ${data.locationName} (${data.countryISO3}):`);
+    for (const [i, video] of data.videos.entries()) {
+      console.log(`   ${i+1}. "${video.title}" - ${video.status}`);
+      console.log(`      URL: ${video.url.substring(0, 60)}...`);
+    }
+  }
+}
+
+// Helper function to log all locations
+function logAllLocations(dbLocations) {
+  for (const [index, loc] of dbLocations.entries()) {
+    console.log(`\n${index + 1}. LOCATION IN YOUR DATABASE:`);
+    console.log(`   ID: ${loc.id}`);
+    console.log(`   Name: "${loc.name}"`);
+    console.log(`   Country ISO3: "${loc.country_iso3 || loc.countryISO3 || 'MISSING'}"`);
+    console.log(`   Coordinates: lng=${loc.lng}, lat=${loc.lat}`);
+    console.log(`   Status: "${loc.status || 'MISSING'}"`);
+    console.log(`   Description: "${loc.description || 'MISSING'}"`);
+    console.log(`   Created: ${loc.created_at}`);
+    console.log(`   Updated: ${loc.updated_at}`);
+    console.log(`   All database fields:`, Object.keys(loc));
+    console.log(`   Full data:`, JSON.stringify(loc, null, 2));
+  }
+}
+
+// Helper function to map locations
+function mapLocations(dbLocations, contentEntries) {
+  return dbLocations
+    .map((loc) => {
+      const locationContent = (contentEntries || []).filter(
+        (content) => content.location_id === loc.id
+      );
+      
+      if (!locationContent || locationContent.length === 0) {
+        console.log(`⚠️ Skipping "${loc.name}" (${loc.country_iso3}) - no published content`);
+        return null;
+      }
+      
+      console.log(`✅ Including "${loc.name}" (${loc.country_iso3}) with ${locationContent.length} video(s)`);
+      
+      const media = locationContent.map((content) => ({
+        id: content.id,
+        type: content.content_type || 'video',
+        url: content.media_url || '',
+        title: content.title || 'Untitled',
+        description: content.description || '',
+        thumbnail: content.thumbnail || '',
+        duration: content.duration || undefined,
+        isFeatured: content.is_featured || false,
+        viewCount: content.view_count || 0,
+        tags: content.tags || [],
+        createdAt: content.created_at,
+        metadata: {
+          originalTitle: content.title,
+          uploadedAt: content.created_at
+        }
+      }));
+      return {
+        id: loc.id,
+        name: loc.name,
+        countryISO3: loc.country_iso3 || loc.countryISO3 || 'UNKNOWN',
+        coordinates: [Number.parseFloat(loc.lng), Number.parseFloat(loc.lat)],
+        lat: Number.parseFloat(loc.lat),
+        lng: Number.parseFloat(loc.lng),
+        description: loc.description || `Location in ${loc.name}`,
+        status: loc.status || 'active',
+        summary: loc.summary || loc.description,
+        tags: loc.tags || [],
+        slug: loc.slug || (loc.name ? loc.name.toLowerCase().replaceAll(/\s+/g, '-') : undefined),
+        visitedDate: loc.visited_date || (loc.created_at ? loc.created_at.split('T')[0] : undefined),
+        viewCount: loc.view_count || 0,
+        isFeatured: loc.is_featured || false,
+        mediaCount: media.length,
+        media: media
+      };
+    })
+    .filter(Boolean);
+}
+
+// Helper function to log formatted locations
+function logFormattedLocations(locations) {
+  console.log('\n=== FORMATTED LOCATIONS BEING SENT TO MAP ===');
+  for (const [i, l] of locations.entries()) {
+    if (l) {
+      console.log(`${i+1}. "${l.name}" (${l.countryISO3}) - [${l.lng}, ${l.lat}]`);
+    }
+  }
+}
+
+// Helper function for locations admin requests
+async function handleLocationsRequest(res) {
+  console.log('📍 DETAILED DATABASE INSPECTION - SHOWING ALL YOUR DATA');
+  try {
+    const supabase = getSupabaseAdminClient();
+    const { data: dbLocations, error } = await supabase
+      .from('locations')
+      .select('*')
+      .order('created_at', { ascending: false });
+    console.log('\n=== YOUR DATABASE LOCATIONS ===');
+    console.log(`Total locations found: ${dbLocations?.length || 0}`);
+    if (error) {
+      console.error('❌ Database error:', error);
+      return res.json({ success: true, locations: [] });
+    }
+    if (!dbLocations || dbLocations.length === 0) {
+      console.log('📍 No locations in your database');
+      return res.json({ success: true, locations: [] });
+    }
+    // Also get content entries for each location - ONLY PUBLISHED with valid media
+    const { data: contentEntries, error: contentError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .not('location_id', 'is', null)
+      .eq('status', 'published')
+      .neq('media_url', '[PENDING]')
+      .not('media_url', 'is', null)
+      .order('created_at', { ascending: false});
+    if (contentError) {
+      console.error('❌ Content error:', contentError);
+    }
+    console.log(`📄 Found ${contentEntries?.length || 0} published content entries with valid media`);
+    
+    logContentByLocation(contentEntries, dbLocations);
+    logAllLocations(dbLocations);
+    
+    const locations = mapLocations(dbLocations, contentEntries);
+    logFormattedLocations(locations);
+    
+    return res.json({ success: true, locations });
+  } catch (err) {
+    console.error('💥 Error:', err);
+    return res.json({ success: true, locations: [] });
+  }
+}
+
 router.get('/', async (req, res) => {
   const adminType = req.query.admin;
   if (adminType === 'debug') {
@@ -1010,143 +1168,7 @@ router.get('/', async (req, res) => {
     }
   }
   // MAIN LOCATIONS ENDPOINT - DETAILED DATABASE INSPECTION
-  console.log('📍 DETAILED DATABASE INSPECTION - SHOWING ALL YOUR DATA');
-  try {
-    const supabase = getSupabaseAdminClient();
-    const { data: dbLocations, error } = await supabase
-      .from('locations')
-      .select('*')
-      .order('created_at', { ascending: false });
-    console.log('\n=== YOUR DATABASE LOCATIONS ===');
-    console.log(`Total locations found: ${dbLocations?.length || 0}`);
-    if (error) {
-      console.error('❌ Database error:', error);
-      return res.json({ success: true, locations: [] });
-    }
-    if (!dbLocations || dbLocations.length === 0) {
-      console.log('📍 No locations in your database');
-      return res.json({ success: true, locations: [] });
-    }
-    // Also get content entries for each location - ONLY PUBLISHED with valid media
-    const { data: contentEntries, error: contentError } = await supabase
-      .from('content_entries')
-      .select('*')
-      .not('location_id', 'is', null)
-      .eq('status', 'published')  // Only published content
-      .neq('media_url', '[PENDING]')  // Exclude pending uploads (use neq instead of not + eq)
-      .not('media_url', 'is', null)  // Exclude null media URLs
-      .order('created_at', { ascending: false});
-    if (contentError) {
-      console.error('❌ Content error:', contentError);
-    }
-    console.log(`📄 Found ${contentEntries?.length || 0} published content entries with valid media`);
-    
-    // Log which content belongs to which location
-    if (contentEntries && contentEntries.length > 0) {
-      console.log('\n=== CONTENT ENTRIES BY LOCATION ===');
-      const contentByLocation = {};
-      contentEntries.forEach(content => {
-        const locId = content.location_id;
-        if (!contentByLocation[locId]) {
-          const location = dbLocations.find(l => l.id === locId);
-          contentByLocation[locId] = {
-            locationName: location?.name || 'Unknown',
-            countryISO3: location?.country_iso3 || 'Unknown',
-            videos: []
-          };
-        }
-        contentByLocation[locId].videos.push({
-          title: content.title,
-          url: content.media_url,
-          status: content.status
-        });
-      });
-      
-      Object.entries(contentByLocation).forEach(([locId, data]) => {
-        console.log(`\n📍 ${data.locationName} (${data.countryISO3}):`);
-        data.videos.forEach((video, i) => {
-          console.log(`   ${i+1}. "${video.title}" - ${video.status}`);
-          console.log(`      URL: ${video.url.substring(0, 60)}...`);
-        });
-      });
-    }
-    dbLocations.forEach((loc, index) => {
-      console.log(`\n${index + 1}. LOCATION IN YOUR DATABASE:`);
-      console.log(`   ID: ${loc.id}`);
-      console.log(`   Name: "${loc.name}"`);
-      console.log(`   Country ISO3: "${loc.country_iso3 || loc.countryISO3 || 'MISSING'}"`);
-      console.log(`   Coordinates: lng=${loc.lng}, lat=${loc.lat}`);
-      console.log(`   Status: "${loc.status || 'MISSING'}"`);
-      console.log(`   Description: "${loc.description || 'MISSING'}"`);
-      console.log(`   Created: ${loc.created_at}`);
-      console.log(`   Updated: ${loc.updated_at}`);
-      console.log(`   All database fields:`, Object.keys(loc));
-      console.log(`   Full data:`, JSON.stringify(loc, null, 2));
-    });
-    // Only return locations that have at least one published content entry with valid media
-    const locations = dbLocations
-      .map((loc) => {
-        // Filter content entries that belong ONLY to this specific location
-        const locationContent = (contentEntries || []).filter(
-          (content) => content.location_id === loc.id
-        );
-        
-        // Skip locations without any published content
-        if (!locationContent || locationContent.length === 0) {
-          console.log(`⚠️ Skipping "${loc.name}" (${loc.country_iso3}) - no published content`);
-          return null;
-        }
-        
-        console.log(`✅ Including "${loc.name}" (${loc.country_iso3}) with ${locationContent.length} video(s)`);
-        
-        const media = locationContent.map((content) => ({
-          id: content.id,
-          type: content.content_type || 'video',
-          url: content.media_url || '',
-          title: content.title || 'Untitled',
-          description: content.description || '',
-          thumbnail: content.thumbnail || '',
-          duration: content.duration || undefined,
-          isFeatured: content.is_featured || false,
-          viewCount: content.view_count || 0,
-          tags: content.tags || [],
-          createdAt: content.created_at,
-          metadata: {
-            originalTitle: content.title,
-            uploadedAt: content.created_at
-          }
-        }));
-        return {
-          id: loc.id,
-          name: loc.name,
-          countryISO3: loc.country_iso3 || loc.countryISO3 || 'UNKNOWN',
-          coordinates: [parseFloat(loc.lng), parseFloat(loc.lat)],
-          lat: parseFloat(loc.lat),
-          lng: parseFloat(loc.lng),
-          description: loc.description || `Location in ${loc.name}`,
-          status: loc.status || 'active',
-          summary: loc.summary || loc.description,
-          tags: loc.tags || [],
-          slug: loc.slug || (loc.name ? loc.name.toLowerCase().replace(/\s+/g, '-') : undefined),
-          visitedDate: loc.visited_date || (loc.created_at ? loc.created_at.split('T')[0] : undefined),
-          viewCount: loc.view_count || 0,
-          isFeatured: loc.is_featured || false,
-          mediaCount: media.length,
-          media: media
-        };
-      })
-      .filter(Boolean); // Remove nulls
-    console.log('\n=== FORMATTED LOCATIONS BEING SENT TO MAP ===');
-    locations.forEach((l, i) => {
-      if (l) {
-        console.log(`${i+1}. "${l.name}" (${l.countryISO3}) - [${l.lng}, ${l.lat}]`);
-      }
-    });
-    return res.json({ success: true, locations });
-  } catch (err) {
-    console.error('💥 Error:', err);
-    return res.json({ success: true, locations: [] });
-  }
+  return await handleLocationsRequest(res);
 });
 
 module.exports = router;
@@ -1158,8 +1180,8 @@ module.exports = router;
 router.get('/', async (req, res) => {
   try {
     const supabase = getSupabaseAdminClient();
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
+    const page = Number.parseInt(req.query.page) || 1;
+    const limit = Number.parseInt(req.query.limit) || 50;
     const offset = (page - 1) * limit;
     // Get media from database
     const { data: mediaData, error, count } = await supabase
@@ -1184,7 +1206,7 @@ router.get('/', async (req, res) => {
       size: media.size || media.file_size || 0,
       mimeType: media.mime_type || 'application/octet-stream',
       locationId: media.location_id,
-      isPublic: media.is_public !== undefined ? media.is_public : true,
+      isPublic: media.is_public === undefined ? true : media.is_public,
       uploadedAt: media.created_at || media.uploaded_at,
       updatedAt: media.updated_at,
       metadata: media.metadata || {}
@@ -1236,7 +1258,7 @@ router.get('/:id', async (req, res) => {
       size: mediaItem.size || mediaItem.file_size || 0,
       mimeType: mediaItem.mime_type || 'application/octet-stream',
       locationId: mediaItem.location_id,
-      isPublic: mediaItem.is_public !== undefined ? mediaItem.is_public : true,
+      isPublic: mediaItem.is_public === undefined ? true : mediaItem.is_public,
       uploadedAt: mediaItem.created_at || mediaItem.uploaded_at,
       updatedAt: mediaItem.updated_at,
       metadata: mediaItem.metadata || {}
@@ -1301,8 +1323,8 @@ router.get('/', async (req, res) => {
       stats: {
         totalLocations: locationsCount || 0,
         totalMedia: mediaCount || 0,
-        communityMembers: parseInt(settingsObj.community_members || '1337'),
-        totalCreators: parseInt(settingsObj.total_creators || '2340')
+        communityMembers: Number.parseInt(settingsObj.community_members || '1337'),
+        totalCreators: Number.parseInt(settingsObj.total_creators || '2340')
       },
       contract: {
         address: settingsObj.contract_address || null,
@@ -1452,7 +1474,7 @@ router.get('/', async (req, res) => {
     console.log(`\n📊 TOTAL LOCATIONS IN DATABASE: ${allLocations?.length || 0}`);
     if (allLocations && allLocations.length > 0) {
       console.log('\n📍 RAW DATABASE RECORDS:');
-      allLocations.forEach((loc, i) => {
+      for (const [i, loc] of allLocations.entries()) {
         console.log(`\n--- LOCATION ${i + 1} ---`);
         console.log(`ID: ${loc.id}`);
         console.log(`Name: "${loc.name}"`);
@@ -1462,7 +1484,7 @@ router.get('/', async (req, res) => {
         console.log(`Status: "${loc.status}"`);
         console.log(`Description: "${loc.description}"`);
         console.log(`Complete record:`, JSON.stringify(loc, null, 2));
-      });
+      }
     }
     return res.json({
       success: true,
@@ -1581,7 +1603,7 @@ router.put('/task/:taskId', async (req, res) => {
     const { taskId } = req.params;
     const { completed, isCompleted } = req.body;
     const supabase = getSupabaseAdminClient();
-    const completionStatus = completed !== undefined ? completed : isCompleted;
+    const completionStatus = completed === undefined ? isCompleted : completed;
     console.log(`?? Express roadmap: Updating task ${taskId} completion to ${completionStatus}`);
     const { data, error } = await supabase
       .from('roadmap_tasks')
@@ -1660,8 +1682,8 @@ module.exports = router;
 router.get('/', async (req, res) => {
   try {
     const { status, limit = '50', offset = '0' } = req.query;
-    const limitNum = parseInt(limit);
-    const offsetNum = parseInt(offset);
+    const limitNum = Number.parseInt(limit);
+    const offsetNum = Number.parseInt(offset);
     const supabase = getSupabaseAdminClient();
     let query = supabase
       .from('schedules')
@@ -1784,7 +1806,7 @@ router.post('/locations', async (req, res) => {
         name: 'New York City',
         country_iso3: 'USA',
         lat: 40.7128,
-        lng: -74.0060,
+        lng: -74.006,
         status: 'live',
         summary: 'LIVE from the Big Apple! Join us for real-time NYC adventures!',
         description: 'The city that never sleeps offers endless content opportunities from Times Square to Brooklyn.',
@@ -1885,19 +1907,19 @@ router.get('/', async (req, res) => {
     // Convert array to object
     const stats = {};
     if (statsData) {
-      statsData.forEach(item => {
+      for (const item of statsData) {
         stats[item.key] = item.value;
-      });
+      }
     }
     return res.json({
       success: true,
       data: {
-        totalMembers: parseInt(stats['community_members'] || '0'),
-        activeStreams: parseInt(stats['active_streams'] || '1'),
+        totalMembers: Number.parseInt(stats['community_members'] || '0'),
+        activeStreams: Number.parseInt(stats['active_streams'] || '1'),
         locationsVisited: visitedLocations || 0,
         totalLocations: totalLocations || 0,
-        viewsLast7d: parseInt(stats['views_last_7d'] || '0'),
-        viewsLast30d: parseInt(stats['views_last_30d'] || '0'),
+        viewsLast7d: Number.parseInt(stats['views_last_7d'] || '0'),
+        viewsLast30d: Number.parseInt(stats['views_last_30d'] || '0'),
         liveStatus: stats['live_status'] || 'OFFLINE',
         lastUpdated: new Date().toISOString()
       }
@@ -1941,15 +1963,15 @@ router.get('/live', async (req, res) => {
     // Convert array to object
     const liveStatsObj = {};
     if (liveStats) {
-      liveStats.forEach(item => {
+      for (const item of liveStats) {
         liveStatsObj[item.key] = item.value;
-      });
+      }
     }
     return res.json({
       success: true,
       live: {
         status: liveStatsObj['live_status'] || 'OFFLINE',
-        currentViewers: parseInt(liveStatsObj['current_viewers'] || '0'),
+        currentViewers: Number.parseInt(liveStatsObj['current_viewers'] || '0'),
         location: liveStatsObj['live_location'] || null,
         streamUrl: liveStatsObj['live_stream_url'] || null,
         activeUsers: recentActivity?.length || 0,
