@@ -379,10 +379,11 @@ router.get('/admin/settings', async (req, res) => {
   try {
     const supabase = getSupabaseAdminClient();
     
+    // First try to get existing settings
     const { data: settings, error } = await supabase
       .from('auto_claim_settings')
       .select('*')
-      .limit(1)
+      .eq('id', '550e8400-e29b-41d4-a716-446655440000')
       .single();
 
     if (error && error.code !== 'PGRST116') { // PGRST116 is "not found" for single()
@@ -390,15 +391,32 @@ router.get('/admin/settings', async (req, res) => {
       return res.status(500).json({ error: 'Failed to fetch settings' });
     }
 
-    // Return default settings if none exist
+    // If settings exist, return them
+    if (settings) {
+      return res.json(settings);
+    }
+
+    // If no settings exist, create default settings
     const defaultSettings = {
+      id: '550e8400-e29b-41d4-a716-446655440000',
       enabled: false,
       claim_interval_minutes: 10,
       distribution_percentage: 30,
       min_claim_amount: 0.001
     };
 
-    res.json(settings || defaultSettings);
+    const { data: newSettings, error: insertError } = await supabase
+      .from('auto_claim_settings')
+      .insert(defaultSettings)
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('Error creating default settings:', insertError);
+      return res.status(500).json({ error: 'Failed to create default settings' });
+    }
+
+    res.json(newSettings);
   } catch (error) {
     console.error('Error in settings GET endpoint:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -420,7 +438,7 @@ router.post('/admin/settings', async (req, res) => {
     const { data, error } = await supabase
       .from('auto_claim_settings')
       .upsert({
-        id: 1, // Use fixed ID for single settings record
+        id: '550e8400-e29b-41d4-a716-446655440000', // Fixed UUID for single settings record
         enabled,
         claim_interval_minutes,
         distribution_percentage,
@@ -515,7 +533,7 @@ router.put('/admin/settings', async (req, res) => {
         distribution_percentage: distributionPercentage,
         min_claim_amount: minClaimAmount
       })
-      .eq('id', req.body.settingsId || '1'); // Assume single settings record
+      .eq('id', '550e8400-e29b-41d4-a716-446655440000'); // Fixed UUID for single settings record
 
     if (error) {
       console.error('Error updating settings:', error);
