@@ -8,7 +8,7 @@ const router = express.Router();
 
 // DEBUG: Log that dividends router is being initialized
 console.log('🎯 Dividends router initializing...');
-console.log('📦 Required modules:'); 
+console.log('📦 Required modules:');
 console.log('   - express:', typeof express);
 console.log('   - getSupabaseAdminClient:', typeof getSupabaseAdminClient);
 console.log('   - triggerManualClaim:', typeof triggerManualClaim);
@@ -317,14 +317,13 @@ router.get('/real-holders', async (req, res) => {
     const { data: settingsData } = await supabase
       .from('auto_claim_settings')
       .select('token_mint_address')
-      .eq('id', '550e8400-e29b-41d4-a716-446655440000')
-      .single();
+      .single(); // Remove hardcoded ID - get the first/only record
 
     let tokenMintAddress = settingsData?.token_mint_address;
 
     // If no token_mint_address in dividend settings, try pumpfun contract address as fallback
-    if (!tokenMintAddress) {
-      console.log('⚠️ No token_mint_address in dividend settings, trying pumpfun contract address...');
+    if (!tokenMintAddress || tokenMintAddress === 'PLACEHOLDER_TOKEN_MINT') {
+      console.log('⚠️ No valid token_mint_address in dividend settings, trying pumpfun contract address...');
       const { data: contractData } = await supabase
         .from('app_settings')
         .select('value')
