@@ -2,6 +2,7 @@ const express = require('express');
 const { getSupabaseAdminClient } = require('../database.js');
 const { triggerManualClaim, getAutoClaimSettings } = require('./services/dividend-claimer.js');
 const { getCronStatus, startDividendCron, stopDividendCron } = require('./services/dividend-cron.js');
+const { getHolderLoyaltyStats, resetHolderInitialBag } = require('./services/holder-loyalty.js');
 
 const router = express.Router();
 
@@ -302,6 +303,132 @@ router.get('/holders', async (req, res) => {
   } catch (error) {
     console.error('Error in holders endpoint:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get REAL BLOCKCHAIN HOLDERS - Same source as dividend distribution system + LOYALTY INFO
+router.get('/real-holders', async (req, res) => {
+  try {
+    console.log('🎯 Real holders endpoint called - using dividend system holder source + loyalty tracking');
+    const limit = Number.parseInt(req.query.limit) || 50;
+    const supabase = getSupabaseAdminClient();
+
+    // Get the token mint address from dividend settings (same source as dividend claimer)
+    const { data: settingsData } = await supabase
+      .from('auto_claim_settings')
+      .select('token_mint_address')
+      .eq('id', '550e8400-e29b-41d4-a716-446655440000')
+      .single();
+
+    let tokenMintAddress = settingsData?.token_mint_address;
+
+    // If no token_mint_address in dividend settings, try pumpfun contract address as fallback
+    if (!tokenMintAddress) {
+      console.log('⚠️ No token_mint_address in dividend settings, trying pumpfun contract address...');
+      const { data: contractData } = await supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', 'pumpfun_contract_address')
+        .single();
+      
+      tokenMintAddress = contractData?.value;
+    }
+
+    if (!tokenMintAddress) {
+      console.log('❌ No token mint address found in dividend settings or app settings');
+      return res.status(400).json({ 
+        error: 'Token mint address not configured. Please configure either token_mint_address in dividend settings or pumpfun_contract_address in app settings',
+        holders: []
+      });
+    }
+
+    console.log(`🔍 Fetching real holders for token mint: ${tokenMintAddress}`);
+
+    // Import and use the SAME getTokenHolders function that dividend system uses
+    const { getTokenHolders } = require('./services/dividend-claimer.js');
+    
+    // Get real blockchain holder data (same as dividend distribution system)
+    const holderData = await getTokenHolders(tokenMintAddress);
+    
+    console.log(`✅ Found ${holderData.holders?.length || 0} real blockchain holders`);
+
+    // Get loyalty status for each holder
+    const formattedHolders = [];
+    
+    for (const holder of holderData.holders.slice(0, limit)) {
+      // Get loyalty status from holder_loyalty_status view
+      const { data: loyaltyData } = await supabase
+        .from('holder_loyalty_status')
+        .select('*')
+        .eq('holder_address', holder.address)
+        .single();
+
+      // Get pending dividends from dividend_distributions table
+      const { data: pendingData } = await supabase
+        .from('dividend_distributions')
+        .select('dividend_amount')
+        .eq('holder_address', holder.address)
+        .eq('status', 'pending')
+        .limit(1)
+        .single();
+
+      // Get total received dividends
+      const { data: receivedData } = await supabase
+        .from('dividend_distributions')
+        .select('dividend_amount')
+        .eq('holder_address', holder.address)
+        .eq('status', 'completed');
+
+      const totalReceived = receivedData?.reduce((sum, dist) => sum + Number.parseFloat(dist.dividend_amount), 0) || 0;
+      const pendingDividends = pendingData ? Number.parseFloat(pendingData.dividend_amount) : 0;
+
+      // Convert balance to proper token amount using decimals
+      const tokenBalance = holder.balance / Math.pow(10, holder.decimals);
+
+      formattedHolders.push({
+        address: holder.address,
+        balance: tokenBalance,
+        percentage: holder.percentage,
+        pendingDividends: pendingDividends,
+        totalReceived: totalReceived,
+        isRealTime: true,
+        source: 'solana-blockchain',
+        // LOYALTY SYSTEM INFO
+        loyaltyStatus: {
+          isEligible: loyaltyData?.is_eligible || false,
+          retentionPercentage: loyaltyData?.retention_percentage || 0,
+          initialBalance: loyaltyData?.initial_balance ? loyaltyData.initial_balance / Math.pow(10, holder.decimals) : null,
+          firstRecorded: loyaltyData?.first_recorded_at || null,
+          blacklistedAt: loyaltyData?.blacklisted_at || null,
+          blacklistReason: loyaltyData?.blacklist_reason || null,
+          status: loyaltyData?.status || 'UNKNOWN',
+          permanentlyBlacklisted: loyaltyData?.permanently_blacklisted || false
+        }
+      });
+    }
+
+    console.log(`✅ Returning ${formattedHolders.length} formatted real holders with loyalty info`);
+
+    // Get loyalty system stats
+    const loyaltyStats = await getHolderLoyaltyStats();
+
+    res.json({
+      holders: formattedHolders,
+      totalSupply: holderData.totalSupply,
+      decimals: holderData.decimals,
+      totalHolders: holderData.holders.length,
+      source: 'solana-blockchain',
+      mintAddress: tokenMintAddress,
+      // LOYALTY SYSTEM SUMMARY
+      loyaltySystemStats: loyaltyStats
+    });
+
+  } catch (error) {
+    console.error('❌ Error in real-holders endpoint:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch real holder data: ' + error.message,
+      holders: []
+    });
   }
 });
 
@@ -629,6 +756,242 @@ router.post('/admin/cron/:action', async (req, res) => {
     res.status(500).json({
       success: false,
       message: `Failed to ${req.params.action} cron: ` + error.message
+    });
+  }
+});
+
+// =====================================================
+// HOLDER LOYALTY SYSTEM ADMIN ENDPOINTS
+// =====================================================
+
+// Admin endpoint to get holder loyalty statistics
+router.get('/admin/holder-loyalty/stats', async (req, res) => {
+  try {
+    console.log('🎯 Getting holder loyalty statistics');
+    
+    const stats = await getHolderLoyaltyStats();
+    
+    res.json({
+      success: true,
+      data: stats
+    });
+  } catch (error) {
+    console.error('❌ Error getting holder loyalty stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get holder loyalty stats: ' + error.message
+    });
+  }
+});
+
+// Admin endpoint to view all holder eligibility status
+router.get('/admin/holder-loyalty/eligibility', async (req, res) => {
+  try {
+    const page = Number.parseInt(req.query.page) || 1;
+    const limit = Number.parseInt(req.query.limit) || 50;
+    const offset = (page - 1) * limit;
+    const status = req.query.status; // 'eligible', 'blacklisted', or null for all
+    
+    console.log(`🎯 Getting holder eligibility data (page ${page}, limit ${limit}, status: ${status || 'all'})`);
+    
+    const supabase = getSupabaseAdminClient();
+    
+    let query = supabase
+      .from('holder_loyalty_status')
+      .select('*')
+      .order('retention_percentage', { ascending: false })
+      .range(offset, offset + limit - 1);
+    
+    if (status === 'eligible') {
+      query = query.eq('is_eligible', true);
+    } else if (status === 'blacklisted') {
+      query = query.eq('is_eligible', false);
+    }
+    
+    const { data: holders, error } = await query;
+    
+    if (error) {
+      throw error;
+    }
+    
+    // Get total count for pagination
+    let countQuery = supabase
+      .from('holder_loyalty_status')
+      .select('*', { count: 'exact', head: true });
+    
+    if (status === 'eligible') {
+      countQuery = countQuery.eq('is_eligible', true);
+    } else if (status === 'blacklisted') {
+      countQuery = countQuery.eq('is_eligible', false);
+    }
+    
+    const { count } = await countQuery;
+    
+    res.json({
+      success: true,
+      data: {
+        holders: holders || [],
+        pagination: {
+          page,
+          limit,
+          total: count || 0,
+          hasMore: (holders?.length || 0) === limit
+        }
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error getting holder eligibility data:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get holder eligibility data: ' + error.message
+    });
+  }
+});
+
+// Admin endpoint to reset a holder's initial bag
+router.post('/admin/holder-loyalty/reset-bag', async (req, res) => {
+  try {
+    const { holderAddress, newBalance, newPercentage, tokenMintAddress } = req.body;
+    
+    if (!holderAddress || !newBalance || !newPercentage || !tokenMintAddress) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: holderAddress, newBalance, newPercentage, tokenMintAddress'
+      });
+    }
+    
+    console.log(`🎯 Admin resetting initial bag for ${holderAddress}`);
+    
+    await resetHolderInitialBag(holderAddress, newBalance, newPercentage, tokenMintAddress);
+    
+    res.json({
+      success: true,
+      message: `Successfully reset initial bag for ${holderAddress}`,
+      data: {
+        holderAddress,
+        newBalance,
+        newPercentage,
+        tokenMintAddress
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error resetting holder initial bag:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to reset holder initial bag: ' + error.message
+    });
+  }
+});
+
+// Admin endpoint to manually check and update all holder eligibility
+router.post('/admin/holder-loyalty/refresh-eligibility', async (req, res) => {
+  try {
+    console.log('🎯 Admin triggering holder eligibility refresh');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Get all holders from loyalty system
+    const { data: holders, error } = await supabase
+      .from('holder_loyalty_status')
+      .select('*');
+    
+    if (error) {
+      throw error;
+    }
+    
+    let updatedCount = 0;
+    let eligibleCount = 0;
+    let blacklistedCount = 0;
+    
+    for (const holder of holders || []) {
+      try {
+        // Recalculate retention percentage
+        const retentionPercentage = holder.initial_balance > 0 
+          ? (holder.current_balance / holder.initial_balance) * 100 
+          : 0;
+        
+        const isEligible = retentionPercentage >= 70;
+        
+        // Update eligibility record
+        await supabase
+          .from('holder_eligibility')
+          .upsert({
+            holder_address: holder.holder_address,
+            current_balance: holder.current_balance,
+            initial_balance: holder.initial_balance,
+            retention_percentage: retentionPercentage,
+            is_eligible: isEligible,
+            last_checked_at: new Date().toISOString(),
+            ...(isEligible === false && {
+              blacklisted_at: new Date().toISOString(),
+              blacklist_reason: `Manual refresh: retention ${retentionPercentage.toFixed(2)}% < 70%`
+            })
+          });
+        
+        updatedCount++;
+        if (isEligible) {
+          eligibleCount++;
+        } else {
+          blacklistedCount++;
+        }
+      } catch (holderError) {
+        console.error(`❌ Error updating holder ${holder.holder_address}:`, holderError);
+      }
+    }
+    
+    console.log(`✅ Refreshed eligibility for ${updatedCount} holders`);
+    
+    res.json({
+      success: true,
+      message: 'Holder eligibility refresh completed',
+      data: {
+        totalProcessed: updatedCount,
+        eligible: eligibleCount,
+        blacklisted: blacklistedCount
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error refreshing holder eligibility:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to refresh holder eligibility: ' + error.message
+    });
+  }
+});
+
+// Admin endpoint to view holder snapshots for a specific claim
+router.get('/admin/holder-loyalty/snapshots/:claimId', async (req, res) => {
+  try {
+    const { claimId } = req.params;
+    
+    console.log(`🎯 Getting holder snapshots for claim ${claimId}`);
+    
+    const supabase = getSupabaseAdminClient();
+    
+    const { data: snapshots, error } = await supabase
+      .from('holder_snapshots')
+      .select('*')
+      .eq('claim_id', claimId)
+      .order('percentage', { ascending: false });
+    
+    if (error) {
+      throw error;
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        claimId,
+        snapshots: snapshots || [],
+        totalHolders: snapshots?.length || 0,
+        eligibleHolders: snapshots?.filter(s => s.is_eligible).length || 0
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error getting holder snapshots:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get holder snapshots: ' + error.message
     });
   }
 });
