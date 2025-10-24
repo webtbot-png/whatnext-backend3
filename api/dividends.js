@@ -333,11 +333,22 @@ router.get('/real-holders', async (req, res) => {
       tokenMintAddress = contractData?.value;
     }
 
-    if (!tokenMintAddress) {
-      console.log('❌ No token mint address found in dividend settings or app settings');
-      return res.status(400).json({ 
-        error: 'Token mint address not configured. Please configure either token_mint_address in dividend settings or pumpfun_contract_address in app settings',
-        holders: []
+    if (!tokenMintAddress || tokenMintAddress === 'PLACEHOLDER_TOKEN_MINT') {
+      console.log('⚠️ No token mint address configured yet - returning empty holder data');
+      return res.json({ 
+        holders: [],
+        totalSupply: 0,
+        decimals: 9,
+        totalHolders: 0,
+        source: 'not-configured',
+        mintAddress: null,
+        loyaltySystemStats: {
+          totalHolders: 0,
+          eligibleHolders: 0,
+          blacklistedHolders: 0,
+          eligibilityPercentage: 0
+        },
+        message: 'Token mint address not configured yet. System will work once token is set up.'
       });
     }
 
