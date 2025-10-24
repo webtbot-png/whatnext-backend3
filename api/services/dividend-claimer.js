@@ -1,9 +1,9 @@
-const { Connection, PublicKey, Transaction, sendAndConfirmTransaction, Keypair } = require('@solana/web3.js');
+const { Connection, PublicKey, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 const { getSupabaseAdminClient } = require('../../database.js');
 const { getEligibleHolders, createHolderSnapshot, calculateProportionalDistribution } = require('./holder-loyalty.js');
-const crypto = require('node:crypto');
+const { solanaPaymentService } = require('../../lib/solana-payment.cjs');
 
-// Solana connection
+// Solana connection for read-only operations
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
 
@@ -277,11 +277,12 @@ async function updateHolderStats(holders, claimId, distributionAmount) {
 }
 
 /**
- * Create dividend distributions for eligible holders only
+ * Create dividend distributions for eligible holders only AND execute actual SOL payments
  */
 async function createDividendDistributionsForEligible(claimId, distributions) {
   const supabase = getSupabaseAdminClient();
   
+  // First, create the database records
   const distributionRecords = distributions.map(dist => ({
     claim_id: claimId,
     holder_address: dist.holder_address,
@@ -300,6 +301,62 @@ async function createDividendDistributionsForEligible(claimId, distributions) {
   }
   
   console.log(`✅ Created ${distributionRecords.length} dividend distributions for ELIGIBLE HOLDERS ONLY`);
+  
+  // Now execute actual SOL payments
+  console.log('💸 Starting actual SOL dividend payments...');
+  
+  // Initialize Solana payment service if needed
+  if (!solanaPaymentService.isInitialized()) {
+    console.log('🔄 Initializing Solana payment service for dividend distribution...');
+    await solanaPaymentService.initialize();
+  }
+  
+  let successfulPayments = 0;
+  let failedPayments = 0;
+  
+  for (const dist of distributions) {
+    try {
+      // Convert SOL amount to lamports (1 SOL = 1,000,000,000 lamports)
+      const lamports = Math.floor(dist.dividend_amount * 1000000000);
+      
+      console.log(`💰 Sending ${dist.dividend_amount} SOL (${lamports} lamports) to ${dist.holder_address}`);
+      
+      const transactionSignature = await solanaPaymentService.sendSOL(dist.holder_address, lamports);
+      
+      // Update database record to completed with transaction signature
+      await supabase
+        .from('dividend_distributions')
+        .update({ 
+          status: 'completed',
+          transaction_signature: transactionSignature,
+          paid_at: new Date().toISOString()
+        })
+        .eq('claim_id', claimId)
+        .eq('holder_address', dist.holder_address);
+      
+      console.log(`✅ DIVIDEND PAYMENT SUCCESSFUL! ${dist.dividend_amount} SOL sent to ${dist.holder_address}, Signature: ${transactionSignature}`);
+      successfulPayments++;
+      
+    } catch (paymentError) {
+      console.error(`❌ Dividend payment failed for ${dist.holder_address}:`, paymentError.message);
+      
+      // Update database record to failed
+      await supabase
+        .from('dividend_distributions')
+        .update({ 
+          status: 'failed',
+          error_message: paymentError.message,
+          failed_at: new Date().toISOString()
+        })
+        .eq('claim_id', claimId)
+        .eq('holder_address', dist.holder_address);
+      
+      failedPayments++;
+    }
+  }
+  
+  console.log(`🎯 Dividend Payment Summary: ${successfulPayments} successful, ${failedPayments} failed`);
+  
   return distributionRecords;
 }
 
