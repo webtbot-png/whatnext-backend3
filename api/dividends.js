@@ -8,7 +8,7 @@ const router = express.Router();
 
 // DEBUG: Log that dividends router is being initialized
 console.log('🎯 Dividends router initializing...');
-console.log('📦 Required modules:');
+console.log('📦 Required modules:'); 
 console.log('   - express:', typeof express);
 console.log('   - getSupabaseAdminClient:', typeof getSupabaseAdminClient);
 console.log('   - triggerManualClaim:', typeof triggerManualClaim);
