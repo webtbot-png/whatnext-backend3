@@ -583,20 +583,36 @@ router.post('/admin/settings', async (req, res) => {
       enabled, 
       claim_interval_minutes, 
       distribution_percentage,
-      min_claim_amount 
+      min_claim_amount,
+      pumpfun_fee_account,
+      token_mint_address,
+      claim_wallet_address
     } = req.body;
 
     const supabase = getSupabaseAdminClient();
 
+    const updateData = {
+      id: '550e8400-e29b-41d4-a716-446655440000', // Fixed UUID for single settings record
+      enabled,
+      claim_interval_minutes,
+      distribution_percentage,
+      min_claim_amount
+    };
+
+    // Only add optional fields if they are provided
+    if (pumpfun_fee_account !== undefined) {
+      updateData.pumpfun_fee_account = pumpfun_fee_account;
+    }
+    if (token_mint_address !== undefined) {
+      updateData.token_mint_address = token_mint_address;
+    }
+    if (claim_wallet_address !== undefined) {
+      updateData.claim_wallet_address = claim_wallet_address;
+    }
+
     const { data, error } = await supabase
       .from('auto_claim_settings')
-      .upsert({
-        id: '550e8400-e29b-41d4-a716-446655440000', // Fixed UUID for single settings record
-        enabled,
-        claim_interval_minutes,
-        distribution_percentage,
-        min_claim_amount
-      });
+      .upsert(updateData);
 
     if (error) {
       console.error('Error updating settings:', error);
@@ -673,19 +689,35 @@ router.put('/admin/settings', async (req, res) => {
       enabled, 
       claimIntervalMinutes, 
       distributionPercentage, 
-      minClaimAmount 
+      minClaimAmount,
+      pumpfunFeeAccount,
+      tokenMintAddress,
+      claimWalletAddress
     } = req.body;
 
     const supabase = getSupabaseAdminClient();
 
+    const updateData = {
+      enabled,
+      claim_interval_minutes: claimIntervalMinutes,
+      distribution_percentage: distributionPercentage,
+      min_claim_amount: minClaimAmount
+    };
+
+    // Only add optional fields if they are provided
+    if (pumpfunFeeAccount !== undefined) {
+      updateData.pumpfun_fee_account = pumpfunFeeAccount;
+    }
+    if (tokenMintAddress !== undefined) {
+      updateData.token_mint_address = tokenMintAddress;
+    }
+    if (claimWalletAddress !== undefined) {
+      updateData.claim_wallet_address = claimWalletAddress;
+    }
+
     const { data, error } = await supabase
       .from('auto_claim_settings')
-      .update({
-        enabled,
-        claim_interval_minutes: claimIntervalMinutes,
-        distribution_percentage: distributionPercentage,
-        min_claim_amount: minClaimAmount
-      })
+      .update(updateData)
       .eq('id', '550e8400-e29b-41d4-a716-446655440000'); // Fixed UUID for single settings record
 
     if (error) {
@@ -995,5 +1027,131 @@ router.get('/admin/holder-loyalty/snapshots/:claimId', async (req, res) => {
     });
   }
 });
+
+// Admin endpoint to check dividend system configuration and status
+router.get('/admin/system-status', async (req, res) => {
+  try {
+    console.log('🎯 Checking dividend system configuration status');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Get current settings
+    const { data: settings, error: settingsError } = await supabase
+      .from('auto_claim_settings')
+      .select('*')
+      .eq('id', '550e8400-e29b-41d4-a716-446655440000')
+      .single();
+    
+    if (settingsError && settingsError.code !== 'PGRST116') {
+      throw settingsError;
+    }
+    
+    // Check configuration status
+    const configStatus = {
+      settingsConfigured: !!settings,
+      pumpfunFeeAccountConfigured: !!(settings?.pumpfun_fee_account && 
+        settings.pumpfun_fee_account !== 'PLACEHOLDER_PUMPFUN_FEE_ACCOUNT' &&
+        settings.pumpfun_fee_account.length === 44),
+      tokenMintAddressConfigured: !!(settings?.token_mint_address && 
+        settings.token_mint_address.length === 44),
+      claimWalletConfigured: !!(settings?.claim_wallet_address && 
+        settings.claim_wallet_address.length === 44),
+      autoClaimEnabled: settings?.enabled || false
+    };
+    
+    // Get recent claim statistics
+    const { data: recentClaims, error: claimsError } = await supabase
+      .from('dividend_claims')
+      .select('*')
+      .order('claim_timestamp', { ascending: false })
+      .limit(5);
+    
+    if (claimsError) {
+      console.error('Error fetching recent claims:', claimsError);
+    }
+    
+    // Get holder loyalty statistics
+    let loyaltyStats = null;
+    try {
+      loyaltyStats = await getHolderLoyaltyStats();
+    } catch (error) {
+      console.error('Error getting loyalty stats:', error);
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        configurationStatus: configStatus,
+        currentSettings: settings || null,
+        recentClaims: recentClaims || [],
+        loyaltySystemStats: loyaltyStats,
+        systemReady: configStatus.settingsConfigured && 
+                    configStatus.tokenMintAddressConfigured,
+        recommendations: generateSystemRecommendations(configStatus, settings)
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error checking system status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check system status: ' + error.message
+    });
+  }
+});
+
+// Helper function to generate system recommendations
+function generateSystemRecommendations(configStatus, settings) {
+  const recommendations = [];
+  
+  if (!configStatus.settingsConfigured) {
+    recommendations.push({
+      type: 'critical',
+      message: 'Dividend system settings are not configured. Please set up basic configuration.',
+      action: 'Configure auto_claim_settings table'
+    });
+  }
+  
+  if (!configStatus.tokenMintAddressConfigured) {
+    recommendations.push({
+      type: 'critical',
+      message: 'Token mint address is not configured. Dividend system cannot fetch holder data.',
+      action: 'Set token_mint_address in admin settings'
+    });
+  }
+  
+  if (!configStatus.pumpfunFeeAccountConfigured) {
+    recommendations.push({
+      type: 'warning',
+      message: 'PumpFun fee account is not configured. Fee claiming will be skipped.',
+      action: 'Set pumpfun_fee_account in admin settings to enable fee claiming'
+    });
+  }
+  
+  if (!configStatus.claimWalletConfigured) {
+    recommendations.push({
+      type: 'warning',
+      message: 'Claim wallet is not configured. Automated distributions may not work.',
+      action: 'Set claim_wallet_address in admin settings'
+    });
+  }
+  
+  if (configStatus.autoClaimEnabled && (!configStatus.tokenMintAddressConfigured || !configStatus.settingsConfigured)) {
+    recommendations.push({
+      type: 'error',
+      message: 'Auto-claim is enabled but system is not properly configured. This may cause errors.',
+      action: 'Complete system configuration or disable auto-claim'
+    });
+  }
+  
+  if (settings?.min_claim_amount && settings.min_claim_amount < 0.001) {
+    recommendations.push({
+      type: 'info',
+      message: 'Minimum claim amount is very low. Consider setting to at least 0.001 SOL.',
+      action: 'Adjust min_claim_amount setting'
+    });
+  }
+  
+  return recommendations;
+}
 
 module.exports = router;
