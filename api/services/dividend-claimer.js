@@ -70,10 +70,15 @@ async function getAutoClaimSettings() {
     throw error;
   }
   
-  // Return the settings, but skip if critical fields are placeholders
-  if (data.token_mint_address === 'PLACEHOLDER_TOKEN_MINT' || 
+  // Return the settings, but skip if critical fields are placeholders or null
+  if (!data.token_mint_address || 
+      data.token_mint_address === 'PLACEHOLDER_TOKEN_MINT' || 
+      !data.claim_wallet_address ||
       data.claim_wallet_address === 'PLACEHOLDER_WALLET_ADDRESS') {
-    console.warn('⚠️ Auto-claim settings contain placeholder values. Dividend system disabled until real values are configured.');
+    console.warn('⚠️ Auto-claim settings contain placeholder/null values. Dividend system disabled until real values are configured.');
+    console.warn(`   - Token mint: ${data.token_mint_address || 'NOT SET'}`);
+    console.warn(`   - Claim wallet: ${data.claim_wallet_address || 'NOT SET'}`);
+    console.warn('💡 This is normal if you haven\'t configured your token yet.');
     return {
       ...data,
       enabled: false // Force disable if using placeholders
