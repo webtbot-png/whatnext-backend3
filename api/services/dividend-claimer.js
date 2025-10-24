@@ -33,38 +33,51 @@ function decryptPrivateKey(encryptedKey, encryptionPassword) {
 async function getAutoClaimSettings() {
   const supabase = getSupabaseAdminClient();
   
+  // Get the first auto_claim_settings record (should only be one)
   const { data, error } = await supabase
     .from('auto_claim_settings')
     .select('*')
-    .eq('id', '550e8400-e29b-41d4-a716-446655440000')
     .single();
     
   if (error) {
     if (error.code === 'PGRST116') { // Not found
       // Create default settings
       const defaultSettings = {
-        id: '550e8400-e29b-41d4-a716-446655440000',
         enabled: false,
         claim_interval_minutes: 10,
         distribution_percentage: 30,
-        min_claim_amount: 0.001
+        min_claim_amount: 0.001,
+        claim_wallet_address: null,
+        pumpfun_fee_account: null,
+        token_mint_address: null
       };
       
-      const { data: newData, error: insertError } = await supabase
+      const { data: newData, error: createError } = await supabase
         .from('auto_claim_settings')
         .insert(defaultSettings)
         .select()
         .single();
         
-      if (insertError) {
-        console.error('❌ Failed to create default auto-claim settings:', insertError);
-        throw new Error('Failed to create default auto-claim settings: ' + insertError.message);
+      if (createError) {
+        console.error('❌ Failed to create default auto-claim settings:', createError);
+        return defaultSettings;
       }
       
       return newData;
-    } else {
-      throw new Error('Failed to fetch auto-claim settings: ' + error.message);
     }
+    
+    console.error('❌ Error fetching auto-claim settings:', error);
+    throw error;
+  }
+  
+  // Return the settings, but skip if critical fields are placeholders
+  if (data.token_mint_address === 'PLACEHOLDER_TOKEN_MINT' || 
+      data.claim_wallet_address === 'PLACEHOLDER_WALLET_ADDRESS') {
+    console.warn('⚠️ Auto-claim settings contain placeholder values. Dividend system disabled until real values are configured.');
+    return {
+      ...data,
+      enabled: false // Force disable if using placeholders
+    };
   }
   
   return data;
