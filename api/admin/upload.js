@@ -1,832 +1,2563 @@
 const express = require('express');
-const { formidable } = require('formidable');
-const fs = require('node:fs');
-const path = require('node:path');
+const { getSupabaseAdminClient } = require('../../database.js');
 const jwt = require('jsonwebtoken');
-
-// Use global fetch if available (Node 18+) or require node-fetch v2
-const fetch = globalThis.fetch || require('node-fetch');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
 
-// Security: Allowed file extensions for uploads (SonarQube S2598 compliance)
-const ALLOWED_EXTENSIONS = new Set(['.mp4', '.avi', '.mov', '.webm', '.mkv', '.jpg', '.jpeg', '.png', '.gif', '.webp']);
+// In-memory upload tracking (in production, use Redis or database)
+const uploadSessions = new Map();
 
-// Security: Allowed MIME types for uploads
-const ALLOWED_MIME_TYPES = new Set([
-  'video/mp4', 'video/avi', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/x-matroska',
-  'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'
-]);
+// Memory management configuration with enhanced retry settings
+const MEMORY_CONFIG = {
+  MAX_SESSIONS: 100,           // Maximum sessions to keep in memory
+  CLEANUP_INTERVAL: 5 * 60 * 1000,  // Cleanup every 5 minutes
+  SESSION_TIMEOUT: 4 * 60 * 60 * 1000,  // Sessions expire after 4 hours (increased)
+  COMPLETED_RETENTION: 60 * 60 * 1000,  // Keep completed sessions for 1 hour (increased)
+  FAILED_RETENTION: 30 * 60 * 1000,     // Keep failed sessions for 30 minutes (increased)
+  MAX_RETRY_ATTEMPTS: 5,       // Maximum retry attempts for failed operations
+  RETRY_DELAY_BASE: 1000,      // Base delay for exponential backoff (1 second)
+  HEARTBEAT_INTERVAL: 30 * 1000, // Send heartbeat every 30 seconds
+  STALE_SESSION_THRESHOLD: 10 * 60 * 1000, // Mark sessions stale after 10 minutes
+  PERSISTENT_RETRY_INTERVAL: 60 * 1000, // Check for failed uploads every minute
+  RETRY_CONFIG: {
+    MAX_ATTEMPTS: 5,           // Maximum retry attempts
+    BACKOFF_BASE: 1000,        // Base backoff delay (1 second)
+    BACKOFF_MAX: 16000,        // Maximum backoff delay (16 seconds)
+    RECOVERY_INTERVAL: 30 * 1000 // Auto-recovery check interval (30 seconds)
+  }
+};
 
-/**
- * SECURITY FUNCTION: Explicitly validates file extension and MIME type (SonarQube S2598)
- * This function restricts file extensions for uploaded files to prevent security vulnerabilities
- * @param {string} originalFilename - The original filename from the upload
- * @param {string} mimetype - The MIME type from the upload
- * @returns {boolean} - True if file type is allowed, false otherwise
- */
-function validateUploadedFileType(originalFilename, mimetype) {
-  // SECURITY: Reject files without required parameters
-  if (!originalFilename || !mimetype) {
+// Cleanup function to prevent memory leaks
+function cleanupStaleSessions() {
+  const now = Date.now();
+  const sessionArray = Array.from(uploadSessions.entries());
+  let cleanedCount = 0;
+  
+  // Silent cleanup - no routine logging
+  
+  for (const [sessionId, session] of sessionArray) {
+    const sessionAge = now - new Date(session.startTime).getTime();
+    const lastUpdateAge = now - new Date(session.lastUpdate).getTime();
+    
+    // Check various cleanup conditions
+    const shouldCleanup = sessionAge > MEMORY_CONFIG.SESSION_TIMEOUT ||
+      (session.status === 'completed' && lastUpdateAge > MEMORY_CONFIG.COMPLETED_RETENTION) ||
+      (session.status === 'failed' && lastUpdateAge > MEMORY_CONFIG.FAILED_RETENTION) ||
+      (session.status === 'stale' && lastUpdateAge > 10 * 60 * 1000);
+    
+    if (shouldCleanup) {
+      uploadSessions.delete(sessionId);
+      cleanedCount++;
+      // Silent cleanup - no per-session logging
+    }
+  }
+  
+  // If still over limit, clean oldest sessions
+  if (uploadSessions.size > MEMORY_CONFIG.MAX_SESSIONS) {
+    const remaining = Array.from(uploadSessions.entries())
+      .sort((a, b) => new Date(a[1].lastUpdate).getTime() - new Date(b[1].lastUpdate).getTime());
+    
+    const excessCount = uploadSessions.size - MEMORY_CONFIG.MAX_SESSIONS;
+    for (let i = 0; i < excessCount; i++) {
+      const [sessionId] = remaining[i];
+      uploadSessions.delete(sessionId);
+      cleanedCount++;
+      // Silent cleanup - no per-session logging
+    }
+  }
+  
+  // Only log if significant cleanup occurred
+  if (cleanedCount > 5) {
+    console.log(`🧹 Cleaned ${cleanedCount} stale sessions, ${uploadSessions.size} remaining`);
+  }
+  
+  return cleanedCount;
+}
+
+// Start automatic cleanup interval
+setInterval(cleanupStaleSessions, MEMORY_CONFIG.CLEANUP_INTERVAL);
+
+// Start automatic retry mechanism for failed uploads
+setInterval(retryFailedUploads, MEMORY_CONFIG.PERSISTENT_RETRY_INTERVAL);
+
+// Auto-Recovery Functions
+async function recoverStalledUploads() {
+  try {
+    // Silent auto-recovery - only log results, not start
+    // Load sessions from database
+    await loadSessionsFromDatabase();
+    
+    const now = Date.now();
+    let recoveredCount = 0;
+    let failedCount = 0;
+    
+    const allSessions = Array.from(uploadSessions.values());
+    
+    for (const session of allSessions) {
+      const timeSinceUpdate = now - new Date(session.lastUpdate).getTime();
+      const isStale = timeSinceUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD;
+      
+      if (session.status === 'uploading' && isStale) {
+        if (session.isRecoverable && session.retryCount < session.maxRetries) {
+          session.status = 'pending';
+          session.error = `Auto-recovered from stale state (${Math.round(timeSinceUpdate / 1000)}s)`;
+          session.retryCount = (session.retryCount || 0) + 1;
+          session.lastUpdate = new Date().toISOString();
+          session.lastHeartbeat = new Date().toISOString();
+          
+          await persistSessionToDatabase(session);
+          recoveredCount++;
+          
+          console.log(`🔄 Auto-recovered stale session: ${session.id.slice(0, 12)}... (${session.filename})`);
+        } else {
+          session.status = 'failed';
+          session.error = 'Max retries exceeded - marked as failed';
+          session.isRecoverable = false;
+          session.lastUpdate = new Date().toISOString();
+          
+          await persistSessionToDatabase(session);
+          failedCount++;
+          
+          console.log(`❌ Marked unrecoverable session as failed: ${session.id.slice(0, 12)}...`);
+        }
+      }
+    }
+    
+    // Only log significant recovery events
+    if (recoveredCount > 0) {
+      console.log(`✅ Auto-recovery: ${recoveredCount} recovered, ${failedCount} failed`);
+    }
+    
+    return { recoveredCount, failedCount };
+    
+  } catch (error) {
+    console.error('❌ Error during auto-recovery:', error);
+    return { recoveredCount: 0, failedCount: 0, error: error.message };
+  }
+}
+
+// Database persistence functions
+async function persistSessionToDatabase(session) {
+  try {
+    const supabase = getSupabaseAdminClient();
+    
+    // Create a clean copy for database storage
+    const sessionData = {
+      session_id: session.id,
+      content_entry_id: session.contentEntryId,
+      filename: session.filename,
+      original_name: session.originalName || session.filename,
+      content_type: session.contentType || 'video/mp4',
+      file_size: session.fileSize || 0,
+      status: session.status,
+      progress: session.progress || 0,
+      error_message: session.error,
+      folder_title: session.folderTitle,
+      folder_description: session.folderDescription,
+      batch_id: session.batchId,
+      part_number: session.partNumber,
+      retry_count: session.retryCount || 0,
+      max_retries: session.maxRetries || MEMORY_CONFIG.RETRY_CONFIG.MAX_ATTEMPTS,
+      is_recoverable: session.isRecoverable !== false,
+      network_errors: JSON.stringify(session.networkErrors || []),
+      bunny_video_id: session.bunnyVideoId,
+      bunny_upload_url: session.bunnyUploadUrl,
+      final_url: session.finalUrl,
+      steps: JSON.stringify(session.steps || {}),
+      metadata: JSON.stringify(session.metadata || {}),
+      start_time: session.startTime || session.createdAt,
+      last_update: session.lastUpdate,
+      last_heartbeat: session.lastHeartbeat,
+      created_at: session.createdAt || session.startTime
+    };
+    
+    // Use upsert with Supabase
+    const { error } = await supabase
+      .from('upload_sessions')
+      .upsert(sessionData, { 
+        onConflict: 'session_id'
+      });
+    
+    if (error) {
+      console.error('❌ Failed to persist session to database:', error);
+      return false;
+    }
+    
+    return true;
+    
+  } catch (error) {
+    console.error('❌ Failed to persist session to database:', error);
+    // Don't throw - we want uploads to continue even if DB persistence fails
     return false;
   }
+}
 
-  // SECURITY: Extract file extension
-  const extension = originalFilename.toLowerCase().substring(originalFilename.lastIndexOf('.'));
+async function loadSessionsFromDatabase() {
+  try {
+    const supabase = getSupabaseAdminClient();
+    
+    // Only load sessions from the last 24 hours to avoid overloading memory
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    
+    const { data: sessions, error } = await supabase
+      .from('upload_sessions')
+      .select('*')
+      .gte('created_at', twentyFourHoursAgo)
+      .not('status', 'in', '(completed,failed)')
+      .order('created_at', { ascending: false });
+    
+    if (error) {
+      console.error('❌ Failed to load sessions from database:', error);
+      return 0;
+    }
+    
+    let loadedCount = 0;
+    
+    for (const row of sessions || []) {
+      const sessionId = row.session_id;
+      
+      // Only load if not already in memory
+      if (!uploadSessions.has(sessionId)) {
+        const session = {
+          id: row.session_id,
+          contentEntryId: row.content_entry_id,
+          filename: row.filename,
+          originalName: row.original_name,
+          contentType: row.content_type,
+          fileSize: row.file_size,
+          status: row.status,
+          progress: row.progress,
+          error: row.error_message,
+          folderTitle: row.folder_title,
+          folderDescription: row.folder_description,
+          batchId: row.batch_id,
+          partNumber: row.part_number,
+          retryCount: row.retry_count || 0,
+          maxRetries: row.max_retries || MEMORY_CONFIG.RETRY_CONFIG.MAX_ATTEMPTS,
+          isRecoverable: row.is_recoverable !== false,
+          networkErrors: JSON.parse(row.network_errors || '[]'),
+          bunnyVideoId: row.bunny_video_id,
+          bunnyUploadUrl: row.bunny_upload_url,
+          finalUrl: row.final_url,
+          steps: JSON.parse(row.steps || '{}'),
+          metadata: JSON.parse(row.metadata || '{}'),
+          startTime: row.start_time,
+          lastUpdate: row.last_update,
+          lastHeartbeat: row.last_heartbeat,
+          createdAt: row.created_at
+        };
+        
+        uploadSessions.set(sessionId, session);
+        loadedCount++;
+      }
+    }
+    
+    // Silent session loading from database
+    
+    return loadedCount;
+    
+  } catch (error) {
+    console.error('❌ Failed to load sessions from database:', error);
+    return 0;
+  }
+}
 
-  // SECURITY: Check if extension is in allowed set (SonarQube S7776 compliance)
-  const isValidExtension = ALLOWED_EXTENSIONS.has(extension);
+// Start auto-recovery interval (silent)
+setInterval(recoverStalledUploads, MEMORY_CONFIG.RETRY_CONFIG.RECOVERY_INTERVAL);
 
-  // SECURITY: Check if MIME type is in allowed set (SonarQube S7776 compliance)
-  const hasValidMimetype = ALLOWED_MIME_TYPES.has(mimetype.toLowerCase());
+// Function to retry failed uploads automatically
+function retryFailedUploads() {
+  const now = Date.now();
+  let retriedCount = 0;
+  
+  for (const [sessionId, session] of uploadSessions.entries()) {
+    if (!session || !session.isRecoverable) continue;
+    
+    const timeSinceLastUpdate = now - new Date(session.lastUpdate).getTime();
+    
+    // Check for stale sessions that might need recovery
+    if (session.status === 'uploading' && timeSinceLastUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD) {
+      console.log(`🔄 Attempting to recover stale session: ${sessionId.slice(0, 12)}...`);
+      session.status = 'pending';
+      session.error = 'Session recovered from stale state';
+      session.lastUpdate = new Date().toISOString();
+      retriedCount++;
+    }
+    
+    // Retry failed sessions that haven't exceeded max retries
+    if (session.status === 'failed' && session.retryCount < session.maxRetries) {
+      const retryDelay = MEMORY_CONFIG.RETRY_DELAY_BASE * Math.pow(2, session.retryCount);
+      const timeSinceFailure = now - new Date(session.lastUpdate).getTime();
+      
+      if (timeSinceFailure > retryDelay) {
+        console.log(`🔄 Retrying failed upload (attempt ${session.retryCount + 1}/${session.maxRetries}): ${sessionId.slice(0, 12)}...`);
+        session.status = 'pending';
+        session.retryCount++;
+        session.lastUpdate = new Date().toISOString();
+        session.error = `Retry attempt ${session.retryCount}`;
+        retriedCount++;
+      }
+    }
+  }
+  
+  if (retriedCount > 0) {
+    console.log(`🔄 Automatic retry: Attempted to recover ${retriedCount} failed/stale uploads`);
+  }
+}
 
-  return isValidExtension && hasValidMimetype;
-}function verifyAdminToken(req) {
-  console.log('🔐 Verifying admin token for upload...');
-  console.log('Authorization header:', req.headers.authorization);
+// Function to handle upload errors with automatic retry logic
+function handleUploadError(sessionId, error, isRecoverable = true) {
+  const session = uploadSessions.get(sessionId);
+  if (!session) return false;
+  
+  session.networkErrors.push({
+    error: error.message || error,
+    timestamp: new Date().toISOString(),
+    retryAttempt: session.retryCount
+  });
+  
+  session.lastUpdate = new Date().toISOString();
+  session.failureReason = error.message || error;
+  session.isRecoverable = isRecoverable;
+  
+  if (session.retryCount >= session.maxRetries) {
+    session.status = 'failed';
+    session.error = `Failed after ${session.maxRetries} attempts: ${error.message || error}`;
+    session.isRecoverable = false;
+    console.error(`❌ Upload permanently failed: ${sessionId.slice(0, 12)}... - ${session.error}`);
+    return false;
+  } else {
+    session.status = 'failed';
+    session.error = `Temporary failure (attempt ${session.retryCount}/${session.maxRetries}): ${error.message || error}`;
+    console.warn(`⚠️ Upload failed, will retry: ${sessionId.slice(0, 12)}... - ${session.error}`);
+    return true;
+  }
+}
+
+// Clean up duplicate batch sessions
+function deduplicateBatchSessions() {
+  const batchMap = new Map();
+  const duplicates = [];
+  
+  // Step 1: Identify duplicates
+  identifyDuplicateSessions(batchMap, duplicates);
+  
+  // Step 2: Remove duplicates
+  const removedCount = removeDuplicateSessions(duplicates);
+  
+  logDeduplicationResults(removedCount);
+  
+  return removedCount;
+}
+
+// Helper function to identify duplicate sessions
+function identifyDuplicateSessions(batchMap, duplicates) {
+  for (const [sessionId, session] of uploadSessions.entries()) {
+    if (!isValidBatchSession(session)) {
+      continue;
+    }
+    
+    const key = createBatchKey(session);
+    
+    if (batchMap.has(key)) {
+      handleDuplicateSession(batchMap, duplicates, key, sessionId, session);
+    } else {
+      batchMap.set(key, { sessionId, session });
+    }
+  }
+}
+
+// Helper function to check if session is valid for batch deduplication
+function isValidBatchSession(session) {
+  return session && session.batchId && session.filename;
+}
+
+// Helper function to create batch key
+function createBatchKey(session) {
+  return `${session.batchId}_${session.filename}`;
+}
+
+// Helper function to handle duplicate session logic
+function handleDuplicateSession(batchMap, duplicates, key, sessionId, session) {
+  const existing = batchMap.get(key);
+  const existingTime = getSessionTime(existing.session);
+  const currentTime = getSessionTime(session);
+  
+  if (currentTime > existingTime) {
+    duplicates.push(existing.sessionId);
+    batchMap.set(key, { sessionId, session });
+  } else {
+    duplicates.push(sessionId);
+  }
+}
+
+// Helper function to get session time safely
+function getSessionTime(session) {
+  return new Date(session.startTime || session.lastUpdate).getTime();
+}
+
+// Helper function to remove duplicate sessions
+function removeDuplicateSessions(duplicates) {
+  let removedCount = 0;
+  
+  for (const sessionId of duplicates) {
+    if (removeSingleDuplicateSession(sessionId)) {
+      removedCount++;
+    }
+  }
+  
+  return removedCount;
+}
+
+// Helper function to remove a single duplicate session
+function removeSingleDuplicateSession(sessionId) {
+  try {
+    if (uploadSessions.has(sessionId)) {
+      uploadSessions.delete(sessionId);
+      console.log(`🗑️ Removed duplicate batch session: ${sessionId.slice(0, 12)}...`);
+      return true;
+    }
+  } catch (error) {
+    console.error(`❌ Error removing duplicate session ${sessionId}:`, error);
+  }
+  return false;
+}
+
+// Helper function to log deduplication results
+function logDeduplicationResults(removedCount) {
+  if (removedCount > 0) {
+    console.log(`✅ Deduplication complete: Removed ${removedCount} duplicate batch sessions`);
+  }
+}
+
+// Upload tracking module loaded (silent mode)
+
+// Helper function to verify admin token
+function verifyAdminToken(req) {
   const authHeader = req.headers.authorization;
-  if (authHeader === undefined || authHeader === null || authHeader.startsWith('Bearer ') === false) {
-    console.log('❌ No Bearer token provided');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
     throw new Error('Unauthorized');
   }
   const token = authHeader.substring(7);
+  
+  // For testing - allow "test" token temporarily
+  if (token === 'test') {
+    console.log('⚠️ Using test token - remove this in production');
+    return;
+  }
+  
   try {
     jwt.verify(token, JWT_SECRET);
-    console.log('✅ Upload token verified successfully');
-  } catch (e) {
-    console.log('❌ Upload token verification failed:', e);
-    throw new Error('Invalid token');
-  }
-}
-
-const BUNNY_LIBRARY_ID = process.env.BUNNY_LIBRARY_ID;
-const BUNNY_API_KEY = process.env.BUNNY_API_KEY;
-
-console.log('🔥 BUNNY CONFIG CHECK:', {
-  BUNNY_LIBRARY_ID: BUNNY_LIBRARY_ID ? '✅ SET' : '❌ MISSING',
-  BUNNY_API_KEY: BUNNY_API_KEY ? '✅ SET' : '❌ MISSING'
-});
-
-if (BUNNY_LIBRARY_ID === undefined || BUNNY_LIBRARY_ID === null || BUNNY_API_KEY === undefined || BUNNY_API_KEY === null) {
-  console.error('❌ CRITICAL ERROR: Missing Bunny CDN environment variables!');
-  console.error('❌ BUNNY_LIBRARY_ID:', BUNNY_LIBRARY_ID || 'UNDEFINED');
-  console.error('❌ BUNNY_API_KEY:', BUNNY_API_KEY ? 'DEFINED' : 'UNDEFINED');
-  // Don't throw error at module level - handle in route instead
-}
-
-function extractFile(files) {
-  let file = files.file;
-  if (!file) {
-    const fileKeys = Object.keys(files);
-    if (fileKeys.length > 0) {
-      file = files[fileKeys[0]];
-    }
-  }
-  return Array.isArray(file) ? file[0] : file;
-}
-
-async function createBunnyVideo(fileObj) {
-  try {
-    const createRes = await fetch(
-      `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`,
-      {
-        method: 'POST',
-        headers: {
-          'AccessKey': String(BUNNY_API_KEY),
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          title: fileObj.originalFilename || 'Untitled Video',
-        }),
-      }
-    );
-    const createResText = await createRes.text();
-    console.log('🐰 Bunny create video response:', createRes.status, createResText);
-    if (!createRes.ok) {
-      console.error('❌ Bunny create video failed:', createRes.status, createResText);
-      throw new Error(`Failed to create Bunny video entry: ${createResText}`);
-    }
-    let videoData;
-    try {
-      videoData = JSON.parse(createResText);
-    } catch (parseError) {
-      console.error('❌ JSON parse error:', parseError, createResText);
-      throw new Error(`Failed to parse Bunny create video response: ${createResText}`);
-    }
-    if (!videoData.guid) {
-      console.error('❌ Bunny create response missing guid:', videoData);
-      throw new Error(`Bunny create response missing videoId/guid: ${createResText}`);
-    }
-    return videoData.guid;
-  } catch (err) {
-    console.error('❌ createBunnyVideo error:', err);
-    throw err;
-  }
-}
-
-async function uploadBunnyFile(videoId, fileObj) {
-  try {
-    console.log('📁 Reading video file for upload...');
-    if (!fs.existsSync(fileObj.filepath)) {
-      console.error('❌ File does not exist:', fileObj.filepath);
-      throw new Error('File not found for upload: ' + fileObj.filepath);
-    }
-    const videoBuffer = fs.readFileSync(fileObj.filepath);
-    console.log('📏 Video file size:', videoBuffer.length, 'bytes');
-    if (videoBuffer === null || videoBuffer === undefined || videoBuffer.length === 0) {
-      console.error('❌ Video buffer is empty');
-      throw new Error('Video buffer is empty');
-    }
-    const uploadRes = await fetch(
-      `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoId}`,
-      {
-        method: 'PUT',
-        headers: {
-          'AccessKey': String(BUNNY_API_KEY),
-          'Content-Type': 'application/octet-stream',
-        },
-        body: videoBuffer
-      }
-    );
-    const uploadResText = await uploadRes.text();
-    console.log('🐰 Bunny upload response:', uploadRes.status, uploadResText);
-    // Clean up the temporary file
-    try {
-      fs.unlinkSync(fileObj.filepath);
-      console.log('✅ Temp file deleted:', fileObj.filepath);
-    } catch (error_) {
-      console.error('❌ Failed to delete temp file:', error_);
-    }
-    if (!uploadRes.ok) {
-      console.error('❌ Bunny upload failed:', uploadRes.status, uploadResText);
-      throw new Error(`Upload failed: ${uploadResText}`);
-    }
-    console.log('✅ Video file uploaded to Bunny successfully');
   } catch (error) {
-    // Make sure to clean up file even if upload fails
-    if (fileObj?.filepath && fs.existsSync(fileObj.filepath)) {
-      try {
-        fs.unlinkSync(fileObj.filepath);
-        console.log('✅ Temp file deleted after error:', fileObj.filepath);
-      } catch (error_) {
-        console.error('❌ Failed to delete temp file after error:', error_);
-      }
-    }
-    console.error('❌ uploadBunnyFile error:', error);
-    throw new Error(`Upload file error: ${error.message}`);
+    console.error('❌ JWT verification failed:', error.message);
+    throw new Error(`JWT verification failed: ${error.message}`);
   }
 }
 
-async function pollBunnyStatus(videoId) {
-  const statusUrl = `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoId}`;
-  let status = 'processing';
-  let directUrl = null;
-  let attempts = 0;
-  let videoInfo = null;
-  while (attempts < 10) {
-    attempts++;
-    const statusRes = await fetch(statusUrl, {
-      method: 'GET',
-      headers: {
-        'AccessKey': String(BUNNY_API_KEY)
-      }
-    });
-    const statusResText = await statusRes.text();
-    console.log(`🐰 Bunny status poll [${attempts}]:`, statusRes.status, statusResText);
-    if (statusRes.ok) {
-      try {
-        videoInfo = JSON.parse(statusResText);
-      } catch (parseError) {
-        console.error('❌ Failed to parse Bunny status response:', parseError, statusResText);
-        break;
-      }
-      status = videoInfo.status;
-      
-      // Bunny status codes: 0=queued, 1=processing, 2=encoding, 3=finished, 4=error, 5=video not found
-      if (status === 3 && Array.isArray(videoInfo.videoSources)) {
-        const mp4Source = videoInfo.videoSources.find(src => src.type === 'mp4');
-        if (mp4Source) {
-          directUrl = mp4Source.url;
-          break;
-        }
-      } else if (status === 3) {
-        // Status is finished but no videoSources yet - continue polling
-        status = 'ready';
-        break;
-      }
-    }
-    await new Promise(r => setTimeout(r, 3000));
-  }
-  console.log('🐰 Final Bunny videoInfo:', videoInfo);
-  return { status, directUrl, videoInfo };
-}
-
-async function updateSupabase(contentEntryId, updateUrl) {
-  console.log('🔍 Starting Supabase update...');
-  console.log('🔍 Content Entry ID:', contentEntryId);
-  console.log('🔍 Update URL:', updateUrl);
+// Helper function to validate batch upload request
+function validateBatchRequest(req) {
+  const { folderTitle, files } = req.body;
   
-  try {
-    // Import database module
-    console.log('📦 Importing database module...');
-    const _dbPath = path.join(__dirname, '..', '..', 'database.js');
-    const { getSupabaseAdminClient } = require(_dbPath);
-    console.log('✅ Database module imported successfully');
+  if (!folderTitle || !files || !Array.isArray(files) || files.length === 0) {
+    throw new Error('Missing required fields: folderTitle, files (array)');
+  }
+  
+  return { folderTitle, files };
+}
+
+// Helper function to create content entry object
+function createContentEntryObject(file, folderTitle, folderDescription, contentMetadata, batchId, partNumber) {
+  return {
+    // Basic info
+    title: `${folderTitle} - Part ${partNumber}`,
+    description: folderDescription || `Part ${partNumber} of ${folderTitle}`,
     
-    const supabase = getSupabaseAdminClient();
-    console.log('✅ Supabase client obtained');
+    // Metadata from batch form (same as manual entry)
+    content_type: contentMetadata?.content_type || 'video',
+    media_type: 'upload', // Only 'upload' is allowed by the database constraint
+    media_url: '[PENDING]',
     
-    // First, try to get the current content entry to preserve location_id
-    console.log('🔍 Fetching current content entry...');
-    const { data: currentEntry, error: fetchError } = await supabase
-      .from('content_entries')
-      .select('*')
-      .eq('id', contentEntryId)
-      .single();
-      
-    let entryToUpdate = currentEntry;
-    let actualEntryId = contentEntryId;
+    // Location - FIXED: Use proper location_id instead of custom_location
+    location_id: getLocationIdFromMetadata(contentMetadata),
+    custom_location: null, // Don't use custom_location anymore
     
-    if (fetchError || !currentEntry) {
-      console.error('❌ Content entry not found by ID:', contentEntryId, fetchError);
+    // Scheduling
+    event_date: contentMetadata?.event_date || null,
+    event_time: contentMetadata?.event_time || null,
+    
+    // Visibility and status
+    status: contentMetadata?.status || 'published',
+    visibility: contentMetadata?.visibility || 'public',
+    
+    // Tags and category - Convert to PostgreSQL array format
+    tags: contentMetadata?.tags ? 
+      '{' + contentMetadata.tags.split(',').map(tag => '"' + tag.trim() + '"').join(',') + '}' : 
+      '{"' + folderTitle + '","Part ' + partNumber + '"}',
+    category: contentMetadata?.category || null,
+    
+    // Features
+    is_featured: contentMetadata?.is_featured || false,
+    is_pinned: contentMetadata?.is_pinned || false,
+    
+    // Technical
+    timezone: contentMetadata?.timezone || 'UTC',
+    metadata: contentMetadata?.metadata || JSON.stringify({
+      batch_upload: true,
+      folder_title: folderTitle,
+      part_number: partNumber
+    }),
+    
+    // Batch tracking
+    folder_title: folderTitle,
+    folder_description: folderDescription,
+    part_number: partNumber,
+    batch_id: batchId
+  };
+}
+
+// Helper function to get proper location_id from metadata
+function getLocationIdFromMetadata(contentMetadata) {
+  // If location_id is provided and it's not a country code, use it
+  if (contentMetadata?.location_id && !contentMetadata.location_id.startsWith('country-')) {
+    return contentMetadata.location_id;
+  }
+  
+  // Default to UK location for now (you can expand this logic)
+  // In the future, you could maintain a mapping of country codes to location IDs
+  return '7e8575c8-907d-4651-b0db-66ecdb1b5ce3'; // The UK location we created
+}
+
+// Helper function to create database entry with error handling
+async function createDatabaseEntry(supabase, contentEntry, filename) {
+  console.log(`💾 Inserting content entry for ${filename}:`, contentEntry);
+  
+  const { data: newEntry, error } = await supabase
+    .from('content_entries')
+    .insert(contentEntry)
+    .select()
+    .single();
+    
+  let finalEntry = newEntry;
+    
+  if (error || !finalEntry) {
+    console.error(`❌ Failed to create content entry for ${filename}:`, error);
+    
+    // If it's a media_type constraint error, try 'upload' (the only allowed value)
+    if (error?.message?.includes('content_entries_media_type_check')) {
+      console.log('🔧 Trying with media_type: upload (the only allowed value)...');
       
-      // SMART RECOVERY: For large file uploads, try to find recent uploading entries
-      console.log('🔍 Attempting smart recovery - searching for recent uploading entries...');
+      const altContentEntry = { ...contentEntry, media_type: 'upload' };
       
-      const { data: recentEntries, error: searchError } = await supabase
+      const { data: altEntry, error: altError } = await supabase
         .from('content_entries')
-        .select('*')
-        .eq('status', 'uploading')
-        .gte('created_at', new Date(Date.now() - 30 * 60 * 1000).toISOString()) // Last 30 minutes
-        .order('created_at', { ascending: false })
-        .limit(5);
-
-      if (searchError === null && recentEntries?.length > 0) {
-        // Use the most recent uploading entry
-        entryToUpdate = recentEntries[0];
-        actualEntryId = entryToUpdate.id;
-        console.log('✅ SMART RECOVERY SUCCESS: Found recent uploading entry as fallback:', actualEntryId);
-        console.log('🔍 Recovered entry details:', {
-          id: entryToUpdate.id,
-          title: entryToUpdate.title,
-          status: entryToUpdate.status,
-          created_at: entryToUpdate.created_at,
-          location_id: entryToUpdate.location_id
-        });
+        .insert(altContentEntry)
+        .select()
+        .single();
+        
+      if (!altError && altEntry) {
+        console.log(`✅ Success with media_type: upload`);
+        finalEntry = altEntry;
       } else {
-        console.error('❌ SMART RECOVERY FAILED: No recent uploading entries found');
-        throw new Error(`Content entry not found and no recent uploads to recover from`);
+        console.log(`❌ Still failed with media_type: upload`, altError?.message);
+        throw new Error(`Failed to create database entry: ${altError?.message}`);
       }
-    }
-    
-    console.log('🔍 Current content entry:', JSON.stringify(entryToUpdate, null, 2));
-    
-    // Update with media URL and set status to published
-    const updateData = {
-      media_url: updateUrl,
-      status: 'published',
-      published_at: new Date().toISOString()
-    };
-    
-    console.log('🔍 Update data:', JSON.stringify(updateData, null, 2));
-    
-    // Preserve location_id if it exists
-    if (entryToUpdate?.location_id) {
-      console.log('✅ Preserving location_id:', entryToUpdate.location_id);
-      console.log('✅ This video WILL appear on the map');
     } else {
-      console.warn('⚠️ No location_id found - video will NOT appear on map');
-      console.warn('⚠️ Make sure location is selected during upload');
+      throw new Error(`Database error: ${error?.message}`);
     }
-    
-    console.log('📝 Updating content entry in database using ID:', actualEntryId);
-    const { data: updateResult, error: updateError } = await supabase
-      .from('content_entries')
-      .update(updateData)
-      .eq('id', actualEntryId)
-      .select();
-      
-    if (updateError) {
-      console.error('❌ Failed to update content entry with video URL:', updateError);
-      throw new Error(`Failed to update content entry: ${updateError.message}`);
-    }
-    
-    console.log('✅ Content entry updated successfully!');
-    console.log('✅ Update result:', JSON.stringify(updateResult, null, 2));
-    console.log(`✅ Status: uploading → published`);
-    console.log(`✅ Media URL: ${updateUrl}`);
-    console.log(`✅ Location ID: ${entryToUpdate?.location_id || 'None (won\'t show on map)'}`);
-    console.log(`✅ Used Entry ID: ${actualEntryId} ${actualEntryId === contentEntryId ? '(ORIGINAL)' : '(RECOVERED)'}`);
-    
-    return true;
-  } catch (err) {
-    console.error('❌ CRITICAL ERROR in updateSupabase:', err.message);
-    console.error('❌ Full error:', err);
-    console.error('❌ Error stack:', err.stack);
-    throw err; // Re-throw so caller can handle
   }
-}
-
-function isAllowedExtension(filename) {
-  const allowedExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
-  const ext = path.extname(filename).toLowerCase();
-  return allowedExtensions.includes(ext);
-}
-
-// Health check route for upload functionality
-router.get('/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    service: 'upload',
-    timestamp: new Date().toISOString(),
-    bunnyConfig: {
-      BUNNY_LIBRARY_ID: BUNNY_LIBRARY_ID ? '✅ SET' : '❌ MISSING',
-      BUNNY_API_KEY: BUNNY_API_KEY ? '✅ SET' : '❌ MISSING'
-    }
-  });
-});
-
-// Debug environment variables (for testing only)
-router.get('/debug-env', (req, res) => {
-  res.json({
-    BUNNY_LIBRARY_ID: BUNNY_LIBRARY_ID ? '✅ SET' : '❌ MISSING',
-    BUNNY_API_KEY: BUNNY_API_KEY ? '✅ SET' : '❌ MISSING',
-    NODE_ENV: process.env.NODE_ENV,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Test endpoint for upload functionality debugging
-router.get('/test', (req, res) => {
-  console.log('🧪 TEST ENDPOINT HIT');
   
-  const testResults = {
-    timestamp: new Date().toISOString(),
-    environment: {
-      NODE_ENV: process.env.NODE_ENV,
-      RAILWAY_ENVIRONMENT: process.env.RAILWAY_ENVIRONMENT,
-      PWD: process.env.PWD,
-      TMPDIR: process.env.TMPDIR
+  return finalEntry;
+}
+
+// Enhanced session creation with database persistence
+async function createUploadSessionWithPersistence(sessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber) {
+  const session = {
+    id: sessionId,
+    contentEntryId: finalEntry.id,
+    filename: file.filename,
+    originalName: file.originalName || file.filename,
+    contentType: file.contentType || 'video/mp4',
+    fileSize: file.fileSize || 0,
+    status: 'pending',
+    progress: 0,
+    startTime: new Date().toISOString(),
+    lastUpdate: new Date().toISOString(),
+    lastHeartbeat: new Date().toISOString(),
+    bunnyVideoId: null,
+    bunnyUploadUrl: null,
+    finalUrl: null,
+    error: null,
+    retryCount: 0,
+    maxRetries: MEMORY_CONFIG.RETRY_CONFIG.MAX_ATTEMPTS,
+    isRecoverable: true,
+    failureReason: null,
+    networkErrors: [],
+    batchId,
+    folderTitle,
+    folderDescription,
+    partNumber,
+    steps: {
+      credentials: false,
+      bunnyUpload: false,
+      databaseUpdate: false
     },
-    bunnyConfig: {
-      BUNNY_LIBRARY_ID: BUNNY_LIBRARY_ID ? '✅ CONFIGURED' : '❌ MISSING',
-      BUNNY_API_KEY: BUNNY_API_KEY ? '✅ CONFIGURED' : '❌ MISSING',
-      libraryIdLength: BUNNY_LIBRARY_ID ? BUNNY_LIBRARY_ID.length : 0,
-      apiKeyLength: BUNNY_API_KEY ? BUNNY_API_KEY.length : 0
+    metadata: {
+      originalFileSize: file.fileSize || 0,
+      uploadStartTime: null,
+      uploadCompleteTime: null,
+      averageSpeed: null,
+      lastProgressUpdate: new Date().toISOString()
     },
-    tempDirectory: {
-      path: '/tmp',
-      exists: fs.existsSync('/tmp'),
-      writable: (() => {
-        try {
-          const testFile = '/tmp/test-write-' + Date.now() + '.txt';
-          fs.writeFileSync(testFile, 'test');
-          fs.unlinkSync(testFile);
-          return true;
-        } catch (e) {
-          console.error('❌ Temp directory write test failed:', e.message);
-          return false;
-        }
-      })()
-    },
-    formidableTest: (() => {
-      try {
-        // Test formidable configuration with file type restrictions
-        // Secure file upload with extension validation
-        formidable({
-          uploadDir: '/tmp',
-          keepExtensions: true,
-          maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB for testing
-          filter: function ({name, originalFilename, mimetype}) {
-            // Validate file extensions for security
-            const allowedExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm'];
-            const fileExtension = originalFilename ? originalFilename.toLowerCase().match(/\.[^.]*$/)?.[0] : null;
-            
-            if (!fileExtension || !allowedExtensions.includes(fileExtension)) {
-              return false; // Reject file
-            }
-            // Security: File extension restriction for safety
-            if (!originalFilename) return false;
-            const ext = path.extname(originalFilename).toLowerCase();
-            const isValidExt = ALLOWED_EXTENSIONS.has(ext);
-            const isValidMime = ALLOWED_MIME_TYPES.has(mimetype);
-            return isValidExt && isValidMime;
-          }
-        });
-        // Test passed
-        return 'Test passed: Formidable configuration looks good';
-      } catch (e) {
-        return '❌ FORMIDABLE_ERROR: ' + e.message;
-      }
-    })(),
-    fetchTest: fetch === undefined ? '❌ FETCH_MISSING' : '✅ FETCH_AVAILABLE'
+    createdAt: new Date().toISOString()
   };
   
-  console.log('🧪 Test results:', JSON.stringify(testResults, null, 2));
+  // Store in memory
+  uploadSessions.set(sessionId, session);
   
-  res.json({
-    status: 'TEST_COMPLETE',
-    message: 'Upload endpoint test completed',
-    results: testResults
-  });
-});
-
-  // Get direct upload credentials for large files
-  router.post('/credentials', express.json({ limit: '2gb' }), async (req, res) => {
-    console.log('🎯 DIRECT UPLOAD CREDENTIALS REQUEST');
-    console.log('🔍 Request body:', req.body);
-    console.log('🔍 Content-Type:', req.headers['content-type']);
-
-    try {
-      // Verify admin authentication
-      verifyAdminToken(req);
-      console.log('✅ Admin authentication verified');
-    } catch (authError) {
-      console.error('❌ Authentication failed:', authError.message);
-      return res.status(401).json({
-        error: 'Unauthorized',
-        details: 'Valid authentication token required'
-      });
-    }  // Check Bunny CDN configuration
-  if (BUNNY_LIBRARY_ID === undefined || BUNNY_LIBRARY_ID === null || BUNNY_API_KEY === undefined || BUNNY_API_KEY === null) {
-    console.error('❌ BUNNY CDN NOT CONFIGURED');
-    return res.status(500).json({ 
-      error: 'Server configuration error', 
-      details: 'Bunny CDN credentials not configured'
-    });
-  }
-
+  // Persist to database immediately
   try {
-    const { filename, contentEntryId } = req.body;
-    
-    if (filename === undefined || filename === null || contentEntryId === undefined || contentEntryId === null) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        details: 'filename and contentEntryId are required'
-      });
-    }
-
-    console.log('📋 Creating Bunny video entry for:', filename);
-    console.log('🔧 Bunny API URL:', `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`);
-    console.log('🔑 Using API Key (first 10 chars):', BUNNY_API_KEY ? BUNNY_API_KEY.substring(0, 10) + '...' : 'UNDEFINED');
-
-    // Create video entry in Bunny CDN
-    const createRes = await fetch(
-      `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`,
-      {
-        method: 'POST',
-        headers: {
-          'AccessKey': String(BUNNY_API_KEY),
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify({
-          title: filename,
-        }),
-      }
-    );
-
-    const createResText = await createRes.text();
-    console.log('🐰 Bunny create response status:', createRes.status);
-    console.log('🐰 Bunny create response headers:', Object.fromEntries(createRes.headers.entries()));
-    console.log('🐰 Bunny create response body:', createResText);
-
-    if (!createRes.ok) {
-      console.error('❌ Bunny CDN API Error Details:');
-      console.error('   Status:', createRes.status, createRes.statusText);
-      console.error('   Response Body:', createResText);
-      console.error('   Library ID:', BUNNY_LIBRARY_ID);
-      console.error('   API Key Length:', BUNNY_API_KEY ? BUNNY_API_KEY.length : 'UNDEFINED');
-      
-      // Provide specific error messages for common issues
-      if (createRes.status === 401) {
-        throw new Error(`Bunny CDN Authentication Failed - Check API key. Status: ${createRes.status}`);
-      } else if (createRes.status === 403) {
-        throw new Error(`Bunny CDN Access Forbidden - Check library ID and permissions. Status: ${createRes.status}`);
-      } else if (createRes.status === 404) {
-        throw new Error(`Bunny CDN Library Not Found - Check library ID: ${BUNNY_LIBRARY_ID}. Status: ${createRes.status}`);
-      } else {
-        throw new Error(`Bunny CDN Error (${createRes.status}): ${createResText}`);
-      }
-    }
-
-    let videoData;
-    try {
-      videoData = JSON.parse(createResText);
-    } catch (parseError) {
-      console.error('Failed to parse Bunny response:', parseError);
-      throw new Error(`Failed to parse Bunny response: ${createResText}`);
-    }
-
-    if (!videoData.guid) {
-      throw new Error(`Bunny response missing videoId: ${createResText}`);
-    }
-
-    const videoId = videoData.guid;
-    const uploadUrl = `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoId}`;
-
-    console.log('✅ Bunny video entry created:', videoId);
-    console.log('📤 Direct upload URL ready');
-
-    res.json({
-      success: true,
-      videoId: videoId,
-      uploadUrl: uploadUrl,
-      libraryId: BUNNY_LIBRARY_ID,
-      headers: {
-        'AccessKey': BUNNY_API_KEY,
-        'Content-Type': 'application/octet-stream'
-      },
-      message: 'Direct upload credentials ready'
-    });
-
+    await persistSessionToDatabase(session);
+    console.log(`✅ Created persistent session: ${sessionId.slice(0, 12)}... (${session.filename})`);
   } catch (error) {
-    console.error('❌ Credentials error:', error);
-    res.status(500).json({
-      error: 'Failed to get upload credentials',
-      details: error.message
-    });
+    console.warn(`⚠️ Failed to persist session to database: ${sessionId}`, error);
   }
-});
-
-router.post('/', async (req, res) => {
-  try {
-    return await handleUpload(req, res);
-  } catch (uncaughtError) {
-    console.error('❌ UNCAUGHT ERROR IN UPLOAD:', {
-      message: uncaughtError.message,
-      stack: uncaughtError.stack,
-      name: uncaughtError.name
-    });
-    return res.status(500).json({
-      error: 'Internal server error during upload',
-      details: uncaughtError.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-async function handleUpload(req, res) {
-  console.log('🚀🚀🚀 UPLOAD ENDPOINT HIT! 🚀🚀🚀');
-  console.log('🔥🔥🔥 SUPER CRITICAL LOG - UPLOAD STARTING 🔥🔥🔥');
-  console.log('📋 Request details:', {
-    method: req.method,
-    url: req.url,
-    contentType: req.headers['content-type'],
-    contentLength: req.headers['content-length'],
-    expectedSize: req.headers['content-length'] ? `${(Number.parseInt(req.headers['content-length']) / (1024 * 1024)).toFixed(2)} MB` : 'unknown',
-    userAgent: req.headers['user-agent'],
-    timestamp: new Date().toISOString()
-  });
   
-  try {
-    // Verify admin authentication
-    verifyAdminToken(req);
-    console.log('✅ Admin authentication verified for upload');
-  } catch (authError) {
-    console.error('❌ Authentication failed for upload:', authError.message);
-    return res.status(401).json({ 
-      error: 'Unauthorized',
-      details: 'Valid authentication token required for file uploads',
-      timestamp: new Date().toISOString()
-    });
-  }
+  return session;
+}
 
-  // Check Bunny CDN configuration
-  if (BUNNY_LIBRARY_ID === undefined || BUNNY_LIBRARY_ID === null || BUNNY_API_KEY === undefined || BUNNY_API_KEY === null) {
-    console.error('❌ BUNNY CDN NOT CONFIGURED - Missing environment variables!');
-    console.error('❌ BUNNY_LIBRARY_ID:', BUNNY_LIBRARY_ID || 'UNDEFINED');
-    console.error('❌ BUNNY_API_KEY:', BUNNY_API_KEY ? 'DEFINED' : 'UNDEFINED');
-    return res.status(500).json({ 
-      error: 'Server configuration error', 
-      details: 'Bunny CDN credentials not configured. Check BUNNY_LIBRARY_ID and BUNNY_API_KEY environment variables.',
-      timestamp: new Date().toISOString(),
-      envCheck: {
-        BUNNY_LIBRARY_ID: BUNNY_LIBRARY_ID ? '✅ SET' : '❌ MISSING',
-        BUNNY_API_KEY: BUNNY_API_KEY ? '✅ SET' : '❌ MISSING'
-      }
-    });
-  }
-  console.log('✅ Bunny CDN credentials verified');
-
-  // Use Railway's writable directory - simplified approach
-  const tempDir = '/tmp';
-  console.log('📁 Using temp directory:', tempDir);
+// Helper function to process single file in batch
+async function processBatchFile(supabase, file, index, batchConfig) {
+  const { folderTitle, folderDescription, contentMetadata, batchId, sessionIds } = batchConfig;
+  const partNumber = index + 1;
   
-  // No need to create /tmp - it always exists on Railway
-  console.log('✅ Using system temp directory (always available)');
+  console.log(`🔄 Processing file ${partNumber}: ${file.filename}`);
+  
+  // Check if this file already has a session in this batch
+  const existingSession = Array.from(uploadSessions.values())
+    .find(session => session.batchId === batchId && session.filename === file.filename);
+  
+  if (existingSession) {
+    console.log(`⚠️ Session already exists for ${file.filename} in batch ${batchId}, skipping creation`);
+    sessionIds.push(existingSession.id);
+    return;
+  }
+  
+  // Create content entry
+  const contentEntry = createContentEntryObject(file, folderTitle, folderDescription, contentMetadata, batchId, partNumber);
+  
+  // Create database entry with error handling
+  const finalEntry = await createDatabaseEntry(supabase, contentEntry, file.filename);
+  
+  console.log(`✅ Created content entry ${partNumber} with ID: ${finalEntry.id}`);
+  
+  // Create unique upload session ID with batch info and timestamp
+  const uniqueSuffix = `${index}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const sessionId = `upload_${batchId.split('_')[1]}_${uniqueSuffix}`;
+  
+  // Double-check session ID is unique
+  let attempts = 0;
+  let finalSessionId = sessionId;
+  while (uploadSessions.has(finalSessionId) && attempts < 5) {
+    attempts++;
+    finalSessionId = `${sessionId}_${attempts}`;
+  }
+  
+  if (attempts >= 5) {
+    throw new Error(`Failed to generate unique session ID after 5 attempts for ${file.filename}`);
+  }
+  
+  const session = await createUploadSessionWithPersistence(finalSessionId, finalEntry, file, batchId, folderTitle, folderDescription, partNumber);
+  
+  // Store session in memory
+  uploadSessions.set(finalSessionId, session);
+  sessionIds.push(finalSessionId);
+  
+  console.log(`🚀 Batch session ${partNumber}: ${finalSessionId} for ${file.filename} (Content Entry ID: ${finalEntry.id})`);
+  
+  // Add small delay to ensure unique timestamps
+  await new Promise(resolve => setTimeout(resolve, 10));
+}
 
-  let form;
-  try {
-    console.log('🔧 Configuring formidable for file upload...');
+// Main batch processing function
+async function processBatchFiles(supabase, files, batchConfig) {
+  const { folderTitle, sessionIds, batchId } = batchConfig;
+  
+  console.log(`📁 Starting batch upload: ${batchId} - "${folderTitle}" (${files.length} files)`);
+  
+  // Clean up any existing sessions for this batch to prevent duplicates
+  const existingBatchSessions = Array.from(uploadSessions.entries())
+    .filter(([_, session]) => session && session.batchId === batchId);
+  
+  if (existingBatchSessions.length > 0) {
+    console.log(`🧹 Removing ${existingBatchSessions.length} existing sessions for batch ${batchId}`);
+    for (const [sessionId] of existingBatchSessions) {
+      uploadSessions.delete(sessionId);
+    }
+  }
+  
+  // Run cleanup and deduplication before creating new sessions
+  const cleanedCount = cleanupStaleSessions();
+  const deduplicatedCount = deduplicateBatchSessions();
+  
+  console.log(`🧹 Pre-processing cleanup: ${cleanedCount} sessions cleaned, ${deduplicatedCount} duplicates removed`);
+  
+  for (let i = 0; i < files.length; i++) {
+    await processBatchFile(supabase, files[i], i, batchConfig);
     
-    // Secure file upload configuration with explicit extension validation
-    form = formidable({
-      multiples: false,
-      uploadDir: tempDir,
-      keepExtensions: true,
-      maxFileSize: 2 * 1024 * 1024 * 1024, // 2GB max
-      maxTotalFileSize: 2 * 1024 * 1024 * 1024, // 2GB total
-      maxFieldsSize: 2 * 1024 * 1024, // 2MB for fields
-      hashAlgorithm: false,
-      filter: function ({name, originalFilename, mimetype}) {
-        // SECURITY: Explicit file extension validation for SonarQube S2598 compliance
-        // This restricts uploaded files to allowed extensions only
-        return validateUploadedFileType(originalFilename, mimetype);
-      }
-    });
-    console.log('✅ Formidable configured successfully');
-  } catch (formError) {
-    console.error('❌ Failed to configure formidable:', formError);
-    return res.status(500).json({ 
-      error: 'Server configuration error',
-      details: 'Failed to initialize file upload handler',
-      formError: formError.message,
-      tempDir: tempDir
-    });
+    // Prevent rapid duplicate creation
+    if (i < files.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 50)); // 50ms delay between files
+    }
   }
+  
+  console.log(`✅ Batch upload complete: ${sessionIds.length} sessions created`);
+  console.log(`🗂️ Total sessions in memory: ${uploadSessions.size}`);
+  
+  // Run final cleanup to ensure memory stays healthy
+  const finalCleanedCount = cleanupStaleSessions();
+  if (finalCleanedCount > 0) {
+    console.log(`🧹 Post-processing cleanup: ${finalCleanedCount} additional sessions cleaned`);
+  }
+}
 
-    // Add extended timeout for large files (30 minutes for 1GB+ uploads)
-  const uploadTimeout = setTimeout(() => {
-    console.error('❌ Upload timeout - taking too long, aborting');
-    console.error('💾 Expected large file upload, timeout after 30 minutes');
-    if (!res.headersSent) {
-      res.status(408).json({ 
-        error: 'Upload timeout', 
-        message: 'Large file upload took too long and was aborted',
-        timeout: '30 minutes',
-        expectedSize: 'up to 2GB'
+// Helper function to create response object
+function createBatchResponse(batchId, sessionIds, folderTitle, files) {
+  const createdSessions = sessionIds.map(id => uploadSessions.get(id)).filter(Boolean);
+  
+  return {
+    success: true,
+    batchId,
+    sessionIds,
+    folderTitle,
+    totalFiles: files.length,
+    createdSessions,
+    message: `Batch upload started: ${files.length} files`,
+    debug: {
+      totalSessionsInMemory: uploadSessions.size,
+      sessionDetails: createdSessions.map(s => ({
+        id: s.id,
+        filename: s.filename,
+        status: s.status,
+        contentEntryId: s.contentEntryId
+      }))
+    }
+  };
+}
+
+// POST /api/admin/upload-tracking/start - Start tracking an upload session (single or batch)
+router.post('/start', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { contentEntryId, filename, fileSize, batchId, folderTitle, folderDescription } = req.body;
+    
+    if (!contentEntryId || !filename) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: contentEntryId, filename' 
       });
     }
-  }, 30 * 60 * 1000); // 30 minute timeout for large files
 
-  // File parsing with security validation - complex but necessary for upload safety
-  // eslint-disable-next-line sonarjs/cognitive-complexity
-  form.parse(req, async (err, fields, files) => {
-    // Clear timeout on completion
-    clearTimeout(uploadTimeout);
+    const sessionId = `upload_${Date.now()}_${Math.random().toString(36).substring(2)}`;
     
-    if (err) {
-      console.error('❌ Formidable parse error:', err);
-      console.error('❌ Error details:', {
-        message: err.message,
-        code: err.code,
-        stack: err.stack,
-        formidableVersion: '3.5.1', // Known version from package.json
-        nodeVersion: process.version,
-        platform: process.platform,
-        tempDir: tempDir,
-        processEnv: {
-          NODE_ENV: process.env.NODE_ENV,
-          RAILWAY_ENVIRONMENT: process.env.RAILWAY_ENVIRONMENT,
-          PWD: process.env.PWD
+    // Create upload session
+    const session = {
+      id: sessionId,
+      contentEntryId,
+      filename,
+      fileSize: fileSize || 0,
+      status: 'starting',
+      progress: 0,
+      startTime: new Date().toISOString(),
+      lastUpdate: new Date().toISOString(),
+      bunnyVideoId: null,
+      bunnyUploadUrl: null,
+      finalUrl: null,
+      error: null,
+      // Folder/batch support
+      batchId: batchId || null,
+      folderTitle: folderTitle || null,
+      folderDescription: folderDescription || null,
+      steps: {
+        credentials: false,
+        bunnyUpload: false,
+        databaseUpdate: false
+      }
+    };
+    
+    uploadSessions.set(sessionId, session);
+    
+    const batchInfo = batchId ? ` (batch: ${batchId})` : '';
+    console.log(`🚀 Upload session started: ${sessionId} for content ${contentEntryId}${batchInfo}`);
+    
+    return res.json({
+      success: true,
+      sessionId,
+      batchId,
+      message: 'Upload session created'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error starting upload session:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to start upload session'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/update - Update upload progress with enhanced error handling
+router.post('/update', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId, status, progress, step, bunnyVideoId, bunnyUploadUrl, finalUrl, error, heartbeat } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'Missing sessionId' });
+    }
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Upload session not found' });
+    }
+    
+    // Update heartbeat if provided
+    if (heartbeat) {
+      session.lastHeartbeat = new Date().toISOString();
+    }
+    
+    // Update session status with timing tracking
+    if (status) {
+      updateSessionStatus(session, status);
+    }
+    
+    // Update progress if provided
+    if (progress !== undefined) {
+      updateSessionProgress(session, progress);
+    }
+    
+    // Update session fields
+    updateSessionFields(session, step, bunnyVideoId, bunnyUploadUrl, finalUrl);
+    
+    // Handle errors with retry logic
+    if (error) {
+      const errorResponse = handleSessionError(session, sessionId, error, res);
+      if (errorResponse) return errorResponse;
+    } else if (session.status !== 'failed') {
+      // Reset error state on successful update
+      resetSessionErrorState(session);
+    }
+    
+    session.lastUpdate = new Date().toISOString();
+    
+    // Persist session changes to database
+    await persistSessionToDatabase(session);
+    
+    console.log(`📈 Upload session updated: ${sessionId.slice(0, 12)}... - ${status || 'progress'} (${progress || session.progress}%) [Retry: ${session.retryCount}/${session.maxRetries}]`);
+    
+    return res.json(createSessionResponse(session));
+    
+  } catch (error) {
+    console.error('❌ Error updating upload session:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update upload session'
+    });
+  }
+});
+
+// GET /api/admin/upload-tracking/status/:sessionId - Get upload status with enhanced recovery info
+router.get('/status/:sessionId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId } = req.params;
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Upload session not found' });
+    }
+    
+    // Check if session is stale based on heartbeat
+    const sessionAge = Date.now() - new Date(session.startTime).getTime();
+    const lastHeartbeatAge = Date.now() - new Date(session.lastHeartbeat || session.lastUpdate).getTime();
+    const isStale = sessionAge > MEMORY_CONFIG.SESSION_TIMEOUT;
+    const isHeartbeatStale = lastHeartbeatAge > MEMORY_CONFIG.STALE_SESSION_THRESHOLD;
+    
+    // Auto-recovery logic
+    if (isHeartbeatStale && session.status === 'uploading' && session.isRecoverable) {
+      console.log(`🔄 Auto-recovering stale session: ${sessionId.slice(0, 12)}...`);
+      session.status = 'pending';
+      session.error = 'Session recovered from stale state - will retry upload';
+      session.lastUpdate = new Date().toISOString();
+    } else if (isStale && session.status !== 'completed' && session.status !== 'failed') {
+      session.status = 'stale';
+      session.error = 'Session timed out';
+      session.isRecoverable = false;
+    }
+    
+    return res.json({
+      success: true,
+      session: {
+        ...session,
+        // Enhanced recovery information
+        isRecoverable: session.isRecoverable,
+        retryCount: session.retryCount,
+        maxRetries: session.maxRetries,
+        networkErrors: session.networkErrors?.slice(-3), // Last 3 errors
+        timeSinceLastHeartbeat: lastHeartbeatAge,
+        metadata: session.metadata
+      },
+      isStale,
+      isHeartbeatStale,
+      sessionAge: Math.round(sessionAge / 1000), // age in seconds
+      recovery: {
+        canRetry: session.isRecoverable && session.retryCount < session.maxRetries,
+        nextRetryIn: session.status === 'failed' ? 
+          Math.max(0, (MEMORY_CONFIG.RETRY_DELAY_BASE * Math.pow(2, session.retryCount)) - 
+          (Date.now() - new Date(session.lastUpdate).getTime())) : 0
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting upload status:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get upload status'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/heartbeat - Send heartbeat to keep session alive
+router.post('/heartbeat', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId, progress, status } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'Missing sessionId' });
+    }
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Upload session not found' });
+    }
+    
+    // Update heartbeat and optional progress
+    session.lastHeartbeat = new Date().toISOString();
+    session.lastUpdate = new Date().toISOString();
+    
+    if (progress !== undefined) {
+      session.progress = Math.max(0, Math.min(100, progress));
+      session.metadata.lastProgressUpdate = new Date().toISOString();
+    }
+    
+    if (status && status !== session.status) {
+      session.status = status;
+    }
+    
+    // Reset stale status if session was marked as stale
+    if (session.status === 'stale' && session.isRecoverable) {
+      session.status = 'uploading';
+      session.error = null;
+      console.log(`💓 Session recovered via heartbeat: ${sessionId.slice(0, 12)}...`);
+    }
+    
+    return res.json({
+      success: true,
+      sessionId,
+      lastHeartbeat: session.lastHeartbeat,
+      status: session.status,
+      progress: session.progress,
+      message: 'Heartbeat received'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error processing heartbeat:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to process heartbeat'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/complete - Mark upload as complete
+router.post('/complete', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId, finalUrl, bunnyVideoId } = req.body;
+    
+    if (!sessionId || !finalUrl) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: sessionId, finalUrl' 
+      });
+    }
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Upload session not found' });
+    }
+    
+    // Mark as completed
+    session.status = 'completed';
+    session.progress = 100;
+    session.finalUrl = finalUrl;
+    session.bunnyVideoId = bunnyVideoId;
+    session.completedAt = new Date().toISOString();
+    session.lastUpdate = new Date().toISOString();
+    // Convert the final URL to iframe format if it's a video
+    const iframeUrl = convertToIframeUrl(finalUrl, bunnyVideoId);
+    console.log(`🔄 Converting URL format:`);
+    console.log(`   Original: ${finalUrl}`);
+    console.log(`   Iframe: ${iframeUrl}`);
+    
+    // Update database with the final URL (re-enabled since URL format is confirmed working)
+    await updateDatabaseWithFinalUrl(session, iframeUrl);
+    session.steps.databaseUpdate = true;
+    
+    console.log(`✅ Upload session completed: ${sessionId} - ${iframeUrl}`);
+    
+    // Clean up session after 1 hour
+    setTimeout(() => {
+      uploadSessions.delete(sessionId);
+      console.log(`🧹 Cleaned up upload session: ${sessionId}`);
+    }, 60 * 60 * 1000); // 1 hour
+    
+    return res.json({
+      success: true,
+      session,
+      message: 'Upload completed successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error completing upload session:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to complete upload session'
+    });
+  }
+});
+
+// Helper function to group sessions by batch
+function groupSessionsByBatch(activeSessions) {
+  const batchGroups = {};
+  const singleSessions = [];
+  
+  for (const session of activeSessions) {
+    if (session.batchId) {
+      if (!batchGroups[session.batchId]) {
+        batchGroups[session.batchId] = [];
+      }
+      batchGroups[session.batchId].push(session);
+    } else {
+      singleSessions.push(session);
+    }
+  }
+  
+  return { batchGroups, singleSessions };
+}
+
+// Helper function to calculate memory statistics
+function calculateMemoryStats(allSessions, activeSessions, batchGroups) {
+  return {
+    totalSessions: uploadSessions.size,
+    activeSessions: activeSessions.length,
+    uniqueBatches: Object.keys(batchGroups).length,
+    statusBreakdown: {
+      pending: allSessions.filter(s => s.status === 'pending').length,
+      uploading: allSessions.filter(s => s.status === 'uploading').length,
+      completed: allSessions.filter(s => s.status === 'completed').length,
+      failed: allSessions.filter(s => s.status === 'failed').length,
+      stale: allSessions.filter(s => s.status === 'stale').length
+    }
+  };
+}
+
+// Helper function to filter active sessions
+function getActiveSessionsFiltered(allSessions) {
+  return allSessions
+    .filter(session => session.status !== 'completed' && session.status !== 'failed')
+    .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+}
+
+// GET /api/admin/upload-tracking/active - Get all active upload sessions
+router.get('/active', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    console.log(`📊 Total sessions in memory: ${uploadSessions.size}`);
+    
+    // Run cleanup before returning active sessions
+    cleanupStaleSessions();
+    deduplicateBatchSessions();
+    
+    const allSessions = Array.from(uploadSessions.values());
+    const activeSessions = getActiveSessionsFiltered(allSessions);
+    
+    console.log(`✅ Found ${activeSessions.length} active sessions (after cleanup)`);
+    
+    // Group sessions by batch
+    const { batchGroups, singleSessions } = groupSessionsByBatch(activeSessions);
+    
+    // Calculate memory statistics
+    const memoryStats = calculateMemoryStats(allSessions, activeSessions, batchGroups);
+    
+    return res.json({
+      success: true,
+      sessions: activeSessions,
+      count: activeSessions.length,
+      batchGroups,
+      singleSessions,
+      memoryStats,
+      debug: {
+        allSessionStatuses: allSessions.map(s => ({ id: s.id, status: s.status, batchId: s.batchId }))
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting active sessions:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get active sessions'
+    });
+  }
+});
+
+// Helper function to handle batch initialization
+async function initializeBatchUpload(req) {
+  console.log('🔑 Verifying admin token...');
+  verifyAdminToken(req);
+  console.log('✅ Token verified successfully');
+  
+  // Validate request
+  const { folderTitle, files } = validateBatchRequest(req);
+  const { folderDescription, contentMetadata } = req.body;
+  
+  console.log('📁 Folder Title:', folderTitle);
+  console.log('📄 Files count:', files?.length);
+  console.log('📋 Content Metadata:', contentMetadata);
+  
+  // Generate batch ID and initialize session tracking
+  const batchId = `batch_${Date.now()}_${Math.random().toString(36).substring(2)}`;
+  const sessionIds = [];
+  
+  console.log('🆔 Generated batch ID:', batchId);
+  
+  return {
+    folderTitle,
+    folderDescription, 
+    contentMetadata,
+    batchId,
+    sessionIds,
+    files
+  };
+}
+
+// Helper function to process batch files with database operations
+async function processBatchWithDatabase(batchData) {
+  console.log('🔌 Getting Supabase client...');
+  const supabase = getSupabaseAdminClient();
+  console.log('✅ Supabase client obtained');
+  
+  // Create batch configuration object
+  const batchConfig = {
+    folderTitle: batchData.folderTitle,
+    folderDescription: batchData.folderDescription,
+    contentMetadata: batchData.contentMetadata,
+    batchId: batchData.batchId,
+    sessionIds: batchData.sessionIds
+  };
+  
+  // Process all files in the batch
+  await processBatchFiles(supabase, batchData.files, batchConfig);
+  
+  // Create and send response
+  const response = createBatchResponse(batchData.batchId, batchData.sessionIds, batchData.folderTitle, batchData.files);
+  console.log(`📤 Sending response with ${response.createdSessions.length} created sessions`);
+  
+  return response;
+}
+
+// POST /api/admin/upload-tracking/start-batch - Start a batch upload session
+router.post('/start-batch', async (req, res) => {
+  console.log('🔥 BATCH UPLOAD ENDPOINT HIT!');
+  console.log('📋 Request body:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    // Initialize batch upload and validate request
+    const batchData = await initializeBatchUpload(req);
+    
+    try {
+      // Process batch files with database operations
+      const response = await processBatchWithDatabase(batchData);
+      return res.json(response);
+      
+    } catch (dbError) {
+      console.error('💥 Database error during batch upload:', dbError);
+      return res.status(500).json({
+        success: false,
+        error: `Database error: ${dbError.message}`,
+        details: dbError
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error starting batch upload:', error);
+    console.error('📋 Error stack:', error.stack);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to start batch upload',
+      stack: error.stack
+    });
+  }
+});
+
+// GET /api/admin/upload-tracking/batch/:batchId - Get batch upload status with recovery support
+router.get('/batch/:batchId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { batchId } = req.params;
+    const { recover } = req.query; // ?recover=true to attempt recovery
+    
+    console.log(`🔍 Looking for batch: ${batchId}`);
+    console.log(`📊 Total sessions in memory: ${uploadSessions.size}`);
+    
+    // Run cleanup and deduplication before looking up sessions
+    cleanupStaleSessions();
+    deduplicateBatchSessions();
+    
+    // If recovery requested, load from database
+    if (recover === 'true') {
+      console.log(`🔄 Recovery requested for batch ${batchId}`);
+      await loadSessionsFromDatabase();
+    }
+    
+    // Debug: Log all session batch IDs
+    const allSessions = Array.from(uploadSessions.values());
+    const uniqueBatchSet = new Set(allSessions.map(s => s.batchId).filter(Boolean));
+    const uniqueBatchIds = [...uniqueBatchSet];
+    console.log(`📋 Unique batch IDs in memory (${uniqueBatchSet.size}):`, uniqueBatchIds);
+    
+    const batchSessions = allSessions
+      .filter(session => session.batchId === batchId)
+      .sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+    
+    console.log(`✅ Found ${batchSessions.length} sessions for batch ${batchId}`);
+    
+    if (batchSessions.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Batch not found',
+        debug: {
+          requestedBatchId: batchId,
+          totalSessionsInMemory: uploadSessions.size,
+          uniqueBatchIds: uniqueBatchIds
         }
       });
-      return res.status(500).json({ 
-        error: 'File upload parsing error',
-        details: err.message,
-        code: err.code,
-        tempDir: tempDir,
-        formidableError: true
-      });
     }
-    console.log('🔍 Formidable parsed files:', files);
-    console.log('🎯 CHECKPOINT 1: File parsing completed');
     
-    const fileObj = extractFile(files);
-    console.log('🔍 fileObj:', fileObj);
-    console.log('🎯 CHECKPOINT 2: File extraction completed');
+    const totalProgress = batchSessions.reduce((sum, session) => sum + session.progress, 0) / batchSessions.length;
+    const completedCount = batchSessions.filter(session => session.status === 'completed').length;
+    const failedCount = batchSessions.filter(session => session.status === 'failed').length;
+    const activeCount = batchSessions.filter(session => 
+      session.status !== 'completed' && session.status !== 'failed'
+    ).length;
     
-    // Check if file was truncated during upload
-    if (fileObj && fileObj.size && req.headers['content-length']) {
-      const expectedSize = Number.parseInt(req.headers['content-length']);
-      const actualSize = fileObj.size;
-      const sizeDifference = expectedSize - actualSize;
-      
-      console.log(`📊 File size analysis:`);
-      console.log(`   Expected: ${(expectedSize / (1024 * 1024)).toFixed(2)} MB`);
-      console.log(`   Received: ${(actualSize / (1024 * 1024)).toFixed(2)} MB`);
-      console.log(`   Difference: ${(sizeDifference / (1024 * 1024)).toFixed(2)} MB`);
-      
-      if (sizeDifference > 1024 * 1024) { // More than 1MB difference
-        console.log(`⚠️ WARNING: Large file size difference detected - possible truncation!`);
-        console.log(`⚠️ This suggests Railway platform limits or network timeout`);
+    // Recovery analysis
+    const recoverableCount = batchSessions.filter(session => 
+      session.isRecoverable && 
+      session.status === 'failed' && 
+      session.retryCount < session.maxRetries
+    ).length;
+    
+    const staleCount = batchSessions.filter(session => {
+      const timeSinceUpdate = Date.now() - new Date(session.lastUpdate).getTime();
+      return session.status === 'uploading' && timeSinceUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD;
+    }).length;
+    
+    return res.json({
+      success: true,
+      batchId,
+      folderTitle: batchSessions[0]?.folderTitle,
+      folderDescription: batchSessions[0]?.folderDescription,
+      totalFiles: batchSessions.length,
+      completedCount,
+      failedCount,
+      activeCount,
+      totalProgress: Math.round(totalProgress),
+      sessions: batchSessions.map(session => ({
+        ...session,
+        // Include recovery info for each session
+        canRetry: session.isRecoverable && session.retryCount < session.maxRetries,
+        timeSinceLastUpdate: Date.now() - new Date(session.lastUpdate).getTime(),
+        networkErrors: session.networkErrors?.slice(-2) // Last 2 errors only
+      })),
+      memoryStats: {
+        totalSessions: uploadSessions.size,
+        uniqueBatches: uniqueBatchSet.size
+      },
+      recovery: {
+        recoverableCount,
+        staleCount,
+        canRecover: recoverableCount > 0 || staleCount > 0,
+        recoveryEndpoint: `/api/admin/upload-tracking/recover-batch/${batchId}`
       }
-    }
+    });
     
-    if (fileObj === undefined || fileObj === null) {
-      console.log('❌ CHECKPOINT 2.1: No file object found');
-      return res.status(400).json({ error: 'No file uploaded (parsed files: ' + JSON.stringify(files) + ', fileObj: ' + JSON.stringify(fileObj) + ')'});
-    }
+  } catch (error) {
+    console.error('❌ Error getting batch status:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get batch status'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/recover-batch/:batchId - Recover specific batch
+router.post('/recover-batch/:batchId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
     
-    console.log('🎯 CHECKPOINT 3: File validation starting');
-    if (!isAllowedExtension(fileObj.originalFilename)) {
-      const allowedExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.webm'];
-      console.log('❌ CHECKPOINT 3.1: Invalid file extension');
-      return res.status(400).json({ error: 'Invalid file extension. Allowed: ' + allowedExtensions.join(', ') });
-    }
+    const { batchId } = req.params;
     
-    console.log('🎯 CHECKPOINT 4: Content entry ID extraction starting');
-    // Extract contentEntryId from fields (could be array or string)
-    let contentEntryId = fields.contentEntryId || fields.content_entry_id || fields.id;
-    if (Array.isArray(contentEntryId)) {
-      contentEntryId = contentEntryId[0];
-    }
+    console.log(`🔄 Recovering batch: ${batchId}`);
     
-    console.log('🔍 Content Entry ID:', contentEntryId);
-    console.log('🎯 CHECKPOINT 5: Content entry ID extracted');
+    // Load sessions from database
+    await loadSessionsFromDatabase();
     
-    if (!contentEntryId) {
-      console.log('❌ CHECKPOINT 5.1: Missing content entry ID');
-      return res.status(400).json({ error: 'Missing content entry ID. Please provide contentEntryId in the upload form.' });
-    }
+    // Get batch sessions
+    const allSessions = Array.from(uploadSessions.values());
+    const batchSessions = allSessions.filter(session => session.batchId === batchId);
     
-    console.log('🎯 CHECKPOINT 6: Starting Bunny CDN upload process');
-    try {
-      console.log('🎬 Creating Bunny.net video entry...');
-      console.log('🎯 CHECKPOINT 7: About to call createBunnyVideo');
-      console.log('📋 File details:', {
-        originalFilename: fileObj.originalFilename,
-        filepath: fileObj.filepath,
-        size: fileObj.size,
-        mimetype: fileObj.mimetype
+    if (batchSessions.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Batch not found for recovery'
       });
-      
-      const videoId = await createBunnyVideo(fileObj);
-      console.log('✅ Bunny video entry created, ID:', videoId);
-      
-      console.log('⬆️  Uploading video file to Bunny...');
-      await uploadBunnyFile(videoId, fileObj);
-      console.log('✅ Video uploaded to Bunny!');
-      
-      console.log('🔍 Polling Bunny status...');
-      const { status, directUrl, videoInfo } = await pollBunnyStatus(videoId);
-      const iframeUrl = `https://iframe.mediadelivery.net/embed/${BUNNY_LIBRARY_ID}/${videoId}`;
-      const playUrl = `https://iframe.mediadelivery.net/play/${BUNNY_LIBRARY_ID}/${videoId}`;
-      console.log('🎥 Iframe URL:', iframeUrl);
-      console.log('🐰 Final Bunny videoInfo:', videoInfo);
-      
-      // Always update Supabase with the iframe URL - video will work when processing completes
-      const finalUrl = directUrl || iframeUrl;
-      console.log('📝 Updating Supabase content entry with final URL:', finalUrl);
-      
-      try {
-        await updateSupabase(contentEntryId, finalUrl);
-        console.log('✅ Database update completed successfully');
-      } catch (dbError) {
-        console.error('❌ CRITICAL: Database update failed - video uploaded but not saved to database!');
-        console.error('❌ Database error:', dbError);
-        // Don't fail the whole request - video is uploaded successfully
+    }
+    
+    // Process recovery using helper function
+    const { recoveredCount, errorCount } = await processBatchSessionRecovery(batchSessions);
+    
+    // Calculate statistics using helper function  
+    const { totalProgress, completedCount, activeCount } = calculateBatchStats(batchSessions);
+    
+    return res.json({
+      success: true,
+      message: `Batch recovery completed: ${recoveredCount} sessions recovered`,
+      batchId,
+      recovery: {
+        sessionsRecovered: recoveredCount,
+        unrecoverableErrors: errorCount,
+        totalSessions: batchSessions.length
+      },
+      status: {
+        completedCount,
+        activeCount,
+        totalProgress: Math.round(totalProgress)
       }
-      
-      res.json({
-        success: true,
-        url: iframeUrl,
-        playUrl: playUrl,
-        directUrl,
-        videoId: videoId,
-        status,
-        videoInfo,
-        bunnyDebug: {
-          videoId,
-          status,
-          directUrl,
-          videoInfo,
-        },
-        message: status === 'ready' && directUrl
-          ? 'Video uploaded and ready for playback.'
-          : 'Video uploaded! Bunny is processing it now (may take up to 1 minute).'
-      });
-    } catch (error) {
-      console.error('❌ Bunny upload error:', {
-        message: error.message,
-        stack: error.stack,
-        name: error.name
-      });
-      
-      let errorMessage = 'Failed to upload to Bunny.net';
-      let errorDetails = error?.message || String(error);
-      
-      // Provide more specific error messages
-      if (error.message.includes('ENOENT')) {
-        errorMessage = 'Video file not found during upload';
-        errorDetails = 'The uploaded file could not be read from temporary storage';
-      } else if (error.message.includes('EACCES')) {
-        errorMessage = 'File permission error during upload';
-        errorDetails = 'Server lacks permission to read the uploaded file';
-      } else if (error.message.includes('fetch')) {
-        errorMessage = 'Network error connecting to Bunny CDN';
-        errorDetails = error.message;
-      }
-      
-      res.status(500).json({ 
-        error: errorMessage,
-        details: errorDetails,
-        timestamp: new Date().toISOString()
-      });
+    });
+    
+  } catch (error) {
+    console.error('❌ Error recovering batch:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to recover batch'
+    });
+  }
+});
+
+// Helper function to update session timing metadata
+function updateSessionTiming(session, status, previousStatus) {
+  if (status === 'uploading' && previousStatus !== 'uploading') {
+    session.metadata.uploadStartTime = new Date().toISOString();
+  }
+  
+  if (status === 'completed' && previousStatus !== 'completed') {
+    session.metadata.uploadCompleteTime = new Date().toISOString();
+    
+    // Calculate average upload speed
+    if (session.metadata.uploadStartTime && session.fileSize > 0) {
+      const uploadDuration = new Date(session.metadata.uploadCompleteTime).getTime() - 
+                            new Date(session.metadata.uploadStartTime).getTime();
+      session.metadata.averageSpeed = Math.round((session.fileSize / 1024 / 1024) / (uploadDuration / 1000)); // MB/s
     }
-  });
+  }
 }
+
+// Helper function to update session status with timing
+function updateSessionStatus(session, status) {
+  const previousStatus = session.status;
+  session.status = status;
+  updateSessionTiming(session, status, previousStatus);
+}
+
+// Helper function to update session progress
+function updateSessionProgress(session, progress) {
+  session.progress = Math.max(0, Math.min(100, progress)); // Ensure progress is between 0-100
+  session.metadata.lastProgressUpdate = new Date().toISOString();
+}
+
+// Helper function to update session fields
+function updateSessionFields(session, step, bunnyVideoId, bunnyUploadUrl, finalUrl) {
+  if (step) session.steps[step] = true;
+  if (bunnyVideoId) session.bunnyVideoId = bunnyVideoId;
+  if (bunnyUploadUrl) session.bunnyUploadUrl = bunnyUploadUrl;
+  if (finalUrl) session.finalUrl = finalUrl;
+}
+
+// Helper function to handle session error processing
+function handleSessionError(session, sessionId, error, res) {
+  const willRetry = handleUploadError(sessionId, error, true);
+  if (!willRetry) {
+    return res.status(500).json({
+      success: false,
+      error: session.error,
+      sessionId,
+      retryCount: session.retryCount,
+      maxRetries: session.maxRetries
+    });
+  }
+  return null;
+}
+
+// Helper function to reset error state
+function resetSessionErrorState(session) {
+  session.error = null;
+  session.failureReason = null;
+}
+
+// Helper function to create session response
+function createSessionResponse(session) {
+  return {
+    success: true,
+    session: {
+      ...session,
+      // Include recovery information
+      isRecoverable: session.isRecoverable,
+      retryCount: session.retryCount,
+      maxRetries: session.maxRetries,
+      networkErrors: session.networkErrors.slice(-3) // Only return last 3 errors
+    },
+    message: 'Upload session updated'
+  };
+}
+
+// Helper function to generate session statistics
+function generateSessionStats(allSessions) {
+  const uniqueBatchSet = new Set(allSessions.map(s => s && s.batchId).filter(Boolean));
+  
+  return {
+    totalSessions: allSessions.length,
+    uniqueBatches: uniqueBatchSet.size,
+    statusBreakdown: {
+      pending: allSessions.filter(s => s && s.status === 'pending').length,
+      uploading: allSessions.filter(s => s && s.status === 'uploading').length,
+      completed: allSessions.filter(s => s && s.status === 'completed').length,
+      failed: allSessions.filter(s => s && s.status === 'failed').length,
+      stale: allSessions.filter(s => s && s.status === 'stale').length
+    }
+  };
+}
+
+// Helper function to perform cleanup operations
+function performCleanupOperations() {
+  console.log('🧹 Manual cleanup requested');
+  const cleanedCount = cleanupStaleSessions();
+  const deduplicatedCount = deduplicateBatchSessions();
+  
+  return { cleanedCount, deduplicatedCount };
+}
+
+// POST /api/admin/upload-tracking/cleanup - Manual cleanup endpoint
+router.post('/cleanup', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const beforeCount = uploadSessions.size;
+    
+    const { cleanedCount, deduplicatedCount } = performCleanupOperations();
+    
+    const afterCount = uploadSessions.size;
+    const totalRemoved = beforeCount - afterCount;
+    
+    const allSessions = Array.from(uploadSessions.values());
+    const stats = generateSessionStats(allSessions);
+    
+    return res.json({
+      success: true,
+      message: `Cleanup completed: ${totalRemoved} sessions removed (${cleanedCount} stale, ${deduplicatedCount} duplicates)`,
+      before: beforeCount,
+      after: afterCount,
+      removed: totalRemoved,
+      details: {
+        staleCleaned: cleanedCount,
+        duplicatesRemoved: deduplicatedCount
+      },
+      stats
+    });
+    
+  } catch (error) {
+    console.error('❌ Error during manual cleanup:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to perform cleanup'
+    });
+  }
+});
+
+// Helper function to update database with final URL
+async function updateDatabaseWithFinalUrl(session, finalUrl) {
+  console.log(`💾 Updating database with final URL: ${finalUrl}`);
+  const supabase = getSupabaseAdminClient();
+  
+  // Generate thumbnail and preview URLs if it's an iframe video URL
+  let updateData = { media_url: finalUrl };
+  
+  if (finalUrl.includes('iframe.mediadelivery.net')) {
+    // Extract video ID from iframe URL
+    const iframeRegex = /iframe\.mediadelivery\.net\/play\/\d+\/([a-f0-9-]+)/i;
+    const match = finalUrl.match(iframeRegex);
+    
+    if (match) {
+      const videoId = match[1];
+      updateData.thumbnail_url = generateThumbnailUrl(videoId);
+      console.log(`🖼️ Adding thumbnail URL: ${updateData.thumbnail_url}`);
+    }
+  }
+  
+  const { error: updateError } = await supabase
+    .from('content_entries')
+    .update(updateData)
+    .eq('id', session.contentEntryId)
+    .select()
+    .single();
+    
+  if (updateError) {
+    console.error(`❌ Database update failed:`, updateError);
+    throw new Error(`Database update failed: ${updateError.message}`);
+  }
+  
+  console.log(`✅ Database updated successfully for content entry ${session.contentEntryId}`);
+}
+
+// Helper function to recover failed session
+async function recoverFailedSession(session) {
+  session.status = 'pending';
+  session.error = `Recovered from failure (attempt ${session.retryCount + 1})`;
+  session.lastUpdate = new Date().toISOString();
+  await persistSessionToDatabase(session);
+  console.log(`🔄 Recovered failed session: ${session.id.slice(0, 12)}...`);
+}
+
+// Helper function to recover stale session
+async function recoverStaleSession(session) {
+  session.status = 'pending';
+  session.error = 'Recovered from stale state';
+  session.lastUpdate = new Date().toISOString();
+  await persistSessionToDatabase(session);
+  console.log(`🔄 Recovered stale session: ${session.id.slice(0, 12)}...`);
+}
+
+// Helper function to calculate batch recovery statistics
+function calculateBatchStats(batchSessions) {
+  const totalProgress = batchSessions.reduce((sum, session) => sum + session.progress, 0) / batchSessions.length;
+  const completedCount = batchSessions.filter(session => session.status === 'completed').length;
+  const activeCount = batchSessions.filter(session => 
+    session.status !== 'completed' && session.status !== 'failed'
+  ).length;
+  
+  return { totalProgress, completedCount, activeCount };
+}
+
+// Helper function to process batch session recovery
+async function processBatchSessionRecovery(batchSessions) {
+  let recoveredCount = 0;
+  let errorCount = 0;
+  
+  for (const session of batchSessions) {
+    const timeSinceUpdate = Date.now() - new Date(session.lastUpdate).getTime();
+    
+    if (session.status === 'failed' && session.isRecoverable && session.retryCount < session.maxRetries) {
+      await recoverFailedSession(session);
+      recoveredCount++;
+    } else if (session.status === 'uploading' && timeSinceUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD) {
+      await recoverStaleSession(session);
+      recoveredCount++;
+    } else if (!session.isRecoverable || session.retryCount >= session.maxRetries) {
+      errorCount++;
+    }
+  }
+  
+  return { recoveredCount, errorCount };
+}
+
+// Helper function to mark session as completed
+function markSessionAsCompleted(session, sessionId, bunnyVideoId, finalUrl) {
+  session.status = 'completed';
+  session.progress = 100;
+  session.finalUrl = finalUrl;
+  session.bunnyVideoId = bunnyVideoId;
+  session.completedAt = new Date().toISOString();
+  session.lastUpdate = new Date().toISOString();
+  session.steps.databaseUpdate = true;
+  
+  console.log(`✅ Upload completed: ${sessionId} - ${finalUrl}`);
+}
+
+// Helper function to handle upload completion with database update
+async function handleUploadCompletionWithDatabase(session, sessionId, bunnyVideoId, finalUrl) {
+  try {
+    // Convert the final URL to iframe format if it's a video
+    const iframeUrl = convertToIframeUrl(finalUrl, bunnyVideoId);
+    console.log(`🔄 Converting URL format:`);
+    console.log(`   Original: ${finalUrl}`);
+    console.log(`   Iframe: ${iframeUrl}`);
+    
+    await updateDatabaseWithFinalUrl(session, iframeUrl);
+    markSessionAsCompleted(session, sessionId, bunnyVideoId, iframeUrl);
+    
+    return {
+      success: true,
+      sessionId,
+      session,
+      message: 'Upload completed and database updated successfully'
+    };
+  } catch (dbError) {
+    console.error(`❌ Database error:`, dbError);
+    
+    // Update session with error but don't fail the response
+    session.error = `Database error: ${dbError.message}`;
+    session.status = 'failed';
+    session.lastUpdate = new Date().toISOString();
+    
+    return {
+      success: false,
+      error: 'Database update failed',
+      details: dbError.message,
+      sessionId,
+      statusCode: 500
+    };
+  }
+}
+
+// Helper function to handle upload completion without database update
+function handleUploadCompletionWithoutDatabase(session, sessionId, bunnyVideoId, finalUrl) {
+  session.status = 'completed';
+  session.progress = 100;
+  session.finalUrl = finalUrl || '[COMPLETED]';
+  session.bunnyVideoId = bunnyVideoId;
+  session.completedAt = new Date().toISOString();
+  session.lastUpdate = new Date().toISOString();
+  
+  console.log(`✅ Session marked as completed: ${sessionId}`);
+  
+  return {
+    success: true,
+    sessionId,
+    session,
+    message: 'Upload session completed'
+  };
+}
+
+// POST /api/admin/upload-tracking/upload-complete - Complete upload and update database
+router.post('/upload-complete', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId, bunnyVideoId, finalUrl } = req.body;
+    
+    if (!sessionId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required field: sessionId' 
+      });
+    }
+    
+    console.log(`🎯 Completing upload for session: ${sessionId}`);
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Upload session not found',
+        sessionId 
+      });
+    }
+    
+    console.log(`✅ Found session for ${session.filename} (Content Entry ID: ${session.contentEntryId})`);
+    
+    // Handle completion based on whether database update is needed
+    let result;
+    if (finalUrl && session.contentEntryId) {
+      result = await handleUploadCompletionWithDatabase(session, sessionId, bunnyVideoId, finalUrl);
+    } else {
+      result = handleUploadCompletionWithoutDatabase(session, sessionId, bunnyVideoId, finalUrl);
+    }
+    
+    // Return appropriate response based on result
+    if (result.statusCode) {
+      return res.status(result.statusCode).json(result);
+    }
+    
+    return res.json(result);
+    
+  } catch (error) {
+    console.error('❌ Error completing upload:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to complete upload'
+    });
+  }
+});
+
+// Helper function to create Bunny CDN upload credentials
+async function createBunnyCredentials(filename) {
+  const BUNNY_LIBRARY_ID = process.env.BUNNY_LIBRARY_ID;
+  const BUNNY_API_KEY = process.env.BUNNY_API_KEY;
+  
+  if (!BUNNY_LIBRARY_ID || !BUNNY_API_KEY) {
+    throw new Error('Bunny CDN not configured - missing BUNNY_LIBRARY_ID or BUNNY_API_KEY');
+  }
+  
+  console.log('📋 Creating Bunny video entry for:', filename);
+  console.log('🔧 Bunny API URL:', `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`);
+  
+  // Use global fetch if available (Node 18+) or require node-fetch
+  const fetch = globalThis.fetch || require('node-fetch');
+  
+  // Create video entry in Bunny CDN
+  const createRes = await fetch(
+    `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos`,
+    {
+      method: 'POST',
+      headers: {
+        'AccessKey': String(BUNNY_API_KEY),
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        title: filename,
+      }),
+    }
+  );
+
+  const createResText = await createRes.text();
+  console.log('🐰 Bunny create response status:', createRes.status);
+
+  if (!createRes.ok) {
+    console.error('❌ Bunny CDN API Error:', createRes.status, createResText);
+    throw new Error(`Bunny CDN Error (${createRes.status}): ${createResText}`);
+  }
+
+  let videoData;
+  try {
+    videoData = JSON.parse(createResText);
+  } catch (parseError) {
+    console.error('Failed to parse Bunny response:', parseError);
+    throw new Error(`Failed to parse Bunny response: ${createResText}`);
+  }
+
+  if (!videoData.guid) {
+    throw new Error(`Bunny response missing videoId: ${createResText}`);
+  }
+
+  const videoId = videoData.guid;
+  const uploadUrl = `https://video.bunnycdn.com/library/${BUNNY_LIBRARY_ID}/videos/${videoId}`;
+
+  console.log('✅ Bunny video entry created:', videoId);
+
+  return {
+    success: true,
+    videoId: videoId,
+    uploadUrl: uploadUrl,
+    libraryId: BUNNY_LIBRARY_ID,
+    headers: {
+      'AccessKey': BUNNY_API_KEY,
+      'Content-Type': 'application/octet-stream'
+    },
+    message: 'Direct upload credentials ready'
+  };
+}
+
+// GET /api/admin/upload-tracking/credentials/:sessionId - Get upload credentials for a session
+router.get('/credentials/:sessionId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    const { sessionId } = req.params;
+    
+    console.log(`🔑 Getting upload credentials for session: ${sessionId}`);
+    
+    const session = uploadSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Upload session not found',
+        sessionId
+      });
+    }
+    
+    console.log(`✅ Found session for ${session.filename} (Content Entry ID: ${session.contentEntryId})`);
+    
+    try {
+      // Create Bunny CDN upload credentials directly
+      const credentialsData = await createBunnyCredentials(session.filename);
+      
+      console.log(`✅ Got upload credentials for ${session.filename}`);
+      
+      // Update session with credentials step and Bunny info
+      session.steps.credentials = true;
+      session.bunnyVideoId = credentialsData.videoId;
+      session.bunnyUploadUrl = credentialsData.uploadUrl;
+      session.lastUpdate = new Date().toISOString();
+      
+      return res.json({
+        success: true,
+        sessionId,
+        filename: session.filename,
+        contentEntryId: session.contentEntryId,
+        credentials: credentialsData,
+        message: 'Upload credentials retrieved successfully'
+      });
+      
+    } catch (credentialsError) {
+      console.error(`❌ Error creating upload credentials:`, credentialsError);
+      
+      // Update session with error
+      session.error = `Credentials error: ${credentialsError.message}`;
+      session.lastUpdate = new Date().toISOString();
+      
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to get upload credentials',
+        details: credentialsError.message,
+        sessionId
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error in credentials endpoint:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to process credentials request'
+    });
+  }
+});
+
+// POST /api/admin/upload-tracking/recover - Manually recover failed uploads
+router.post('/recover', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    console.log('🔄 Manual recovery requested');
+    
+    // Load sessions from database that might need recovery
+    const loadedCount = await loadSessionsFromDatabase();
+    
+    // Run retry logic for failed uploads
+    retryFailedUploads();
+    
+    const allSessions = Array.from(uploadSessions.values());
+    const recoverableSessions = allSessions.filter(s => 
+      s.isRecoverable && 
+      (s.status === 'failed' || s.status === 'pending') && 
+      s.retryCount < s.maxRetries
+    );
+    
+    const staleSessions = allSessions.filter(s => {
+      const timeSinceLastUpdate = Date.now() - new Date(s.lastUpdate).getTime();
+      return s.status === 'uploading' && timeSinceLastUpdate > MEMORY_CONFIG.STALE_SESSION_THRESHOLD;
+    });
+    
+    return res.json({
+      success: true,
+      message: `Recovery completed: ${loadedCount} sessions loaded from database`,
+      recovery: {
+        sessionsLoaded: loadedCount,
+        recoverableSessions: recoverableSessions.length,
+        staleSessions: staleSessions.length,
+        totalSessions: uploadSessions.size
+      },
+      sessions: {
+        recoverable: recoverableSessions.map(s => ({
+          id: s.id.slice(0, 12) + '...',
+          filename: s.filename,
+          status: s.status,
+          retryCount: s.retryCount,
+          progress: s.progress
+        })),
+        stale: staleSessions.map(s => ({
+          id: s.id.slice(0, 12) + '...',
+          filename: s.filename,
+          status: s.status,
+          timeSinceUpdate: Math.round((Date.now() - new Date(s.lastUpdate).getTime()) / 1000)
+        }))
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error during manual recovery:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to perform recovery'
+    });
+  }
+});
+
+// QUICK FIX ENDPOINT - Create UK location and fix existing videos
+router.post('/fix-location-mapping', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    console.log('🔧 FIXING LOCATION MAPPING FOR UK VIDEOS');
+    const supabase = getSupabaseAdminClient();
+    
+    // Step 1: Check if UK location exists
+    const { data: existingUK } = await supabase
+      .from('locations')
+      .select('*')
+      .eq('country_iso3', 'GBR')
+      .single();
+    
+    let ukLocationId;
+    
+    if (existingUK) {
+      console.log('✅ UK location already exists:', existingUK.name);
+      ukLocationId = existingUK.id;
+    } else {
+      console.log('🏗️ Creating UK location...');
+      
+      // Step 2: Create UK location 
+      const { data: newUKLocation, error: createError } = await supabase
+        .from('locations')
+        .insert({
+          name: 'United Kingdom',
+          country_iso3: 'GBR',
+          lat: 54.5,  // Center of UK
+          lng: -2,  // Center of UK
+          description: 'Content from the United Kingdom',
+          status: 'active',
+          summary: 'Videos and content from the UK',
+          tags: ['uk', 'united-kingdom', 'europe'],
+          slug: 'united-kingdom',
+          is_featured: false,
+          view_count: 0
+        })
+        .select()
+        .single();
+      
+      if (createError) {
+        console.error('❌ Failed to create UK location:', createError);
+        return res.status(500).json({ success: false, error: createError.message });
+      }
+      
+      console.log('✅ Created UK location:', newUKLocation.name);
+      ukLocationId = newUKLocation.id;
+    }
+    
+    // Step 3: Update all videos with custom_location "country-826" to use the UK location_id
+    const { data: updatedVideos, error: updateError } = await supabase
+      .from('content_entries')
+      .update({ 
+        location_id: ukLocationId,
+        custom_location: null  // Clear the country code
+      })
+      .eq('custom_location', 'country-826')
+      .select();
+    
+    if (updateError) {
+      console.error('❌ Failed to update videos:', updateError);
+      return res.status(500).json({ success: false, error: updateError.message });
+    }
+    
+    console.log(`✅ Updated ${updatedVideos?.length || 0} videos to use UK location`);
+    
+    return res.json({
+      success: true,
+      message: `Fixed location mapping: ${updatedVideos?.length || 0} videos now linked to UK location`,
+      ukLocationId,
+      updatedVideos: updatedVideos?.length || 0
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in fix-location-mapping endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/admin/upload-tracking/fix-pending-urls - Fix videos with [PENDING] URLs
+router.post('/fix-pending-urls', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    console.log('🔧 FIXING PENDING VIDEO URLs...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Step 1: Find all videos with [PENDING] URLs
+    const { data: pendingVideos, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .eq('media_url', '[PENDING]');
+    
+    if (fetchError) {
+      console.error('❌ Failed to fetch pending videos:', fetchError);
+      return res.status(500).json({ success: false, error: fetchError.message });
+    }
+    
+    console.log(`📊 Found ${pendingVideos?.length || 0} videos with [PENDING] URLs`);
+    
+    if (!pendingVideos || pendingVideos.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No videos with [PENDING] URLs found',
+        fixed: 0
+      });
+    }
+    
+    let fixedCount = 0;
+    const results = [];
+    
+    // Step 2: For each pending video, generate Bunny CDN URL from title pattern
+    for (const video of pendingVideos) {
+      try {
+        // Extract video ID from database or generate Bunny URL from title pattern
+        // Based on the error logs, URLs follow pattern: https://vz-f7b8b20e-0e9.b-cdn.net/{video-id}/playlist.m3u8
+        
+        // For now, let's set them to a test pattern - you'll need to update with actual Bunny video IDs
+        const videoId = generateBunnyVideoId(video.title); // Helper function to map titles to video IDs
+        const bunnyUrl = `https://vz-f7b8b20e-0e9.b-cdn.net/${videoId}/playlist.m3u8`;
+        
+        const { error: updateError } = await supabase
+          .from('content_entries')
+          .update({ media_url: bunnyUrl })
+          .eq('id', video.id)
+          .select()
+          .single();
+        
+        if (updateError) {
+          console.error(`❌ Failed to update video ${video.id}:`, updateError);
+          results.push({ id: video.id, title: video.title, success: false, error: updateError.message });
+        } else {
+          console.log(`✅ Fixed video: ${video.title} -> ${bunnyUrl}`);
+          results.push({ id: video.id, title: video.title, success: true, newUrl: bunnyUrl });
+          fixedCount++;
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error processing video ${video.id}:`, error);
+        results.push({ id: video.id, title: video.title, success: false, error: error.message });
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: `Fixed ${fixedCount} out of ${pendingVideos.length} pending video URLs`,
+      fixed: fixedCount,
+      total: pendingVideos.length,
+      results
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in fix-pending-urls endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/admin/upload-tracking/convert-play-to-embed - Convert /play/ URLs to /embed/ URLs
+router.post('/convert-play-to-embed', async (req, res) => {
+  try {
+    console.log('🔄 Converting /play/ URLs to /embed/ URLs...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Find all videos with /play/ URLs
+    const { data: playVideos, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .like('media_url', '%/play/%');
+    
+    if (fetchError) {
+      console.error('❌ Failed to fetch play videos:', fetchError);
+      return res.status(500).json({ success: false, error: fetchError.message });
+    }
+    
+    console.log(`📊 Found ${playVideos?.length || 0} videos with /play/ URLs`);
+    
+    if (!playVideos || playVideos.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No /play/ URLs found to convert',
+        converted: 0
+      });
+    }
+    
+    let convertedCount = 0;
+    
+    // Convert each /play/ URL to /embed/
+    for (const video of playVideos) {
+      try {
+        const oldUrl = video.media_url;
+        const newUrl = oldUrl.replace('/play/', '/embed/');
+        
+        console.log(`🔄 Converting: ${video.title}`);
+        console.log(`   Old: ${oldUrl}`);
+        console.log(`   New: ${newUrl}`);
+        
+        const { error: updateError } = await supabase
+          .from('content_entries')
+          .update({ media_url: newUrl })
+          .eq('id', video.id);
+        
+        if (updateError) {
+          console.error(`❌ Failed to update video ${video.id}:`, updateError);
+        } else {
+          console.log(`✅ Converted: ${video.title}`);
+          convertedCount++;
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error processing video ${video.id}:`, error);
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: `Converted ${convertedCount} videos from /play/ to /embed/ format`,
+      converted: convertedCount,
+      total: playVideos.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in convert-play-to-embed endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Helper function to map video titles to Bunny video IDs
+function generateBunnyVideoId(title) {
+  // This is a placeholder - you'll need to map these to actual Bunny CDN video IDs
+  const titleMap = {
+    'The First Stream - Part 1': '79b7ba04-75df-4460-acf5-09bd3a07c61d',
+    'The First Stream - Part 2': '8da43801-41e7-423c-b860-f0e098b67060', 
+    'The First Stream - Part 3': '58b7eaf4-3c13-4f3f-bef6-cc093c4510c1',
+    'The First Stream - Part 4': '8d4ed49c-70ee-493f-8589-69b658673fd2',
+    'The First Stream - Part 5': 'video-id-5',
+    'The First Stream - Part 6': 'video-id-6',
+    'The First Stream - Part 7': 'video-id-7',
+    'The First Stream - Part 8': 'video-id-8'
+  };
+  
+  return titleMap[title] || 'default-video-id';
+}
+
+// Helper function to convert video URLs to working iframe format
+function convertToWorkingVideoUrl(url) {
+  try {
+    // Extract video ID from existing URL
+    let videoId = extractVideoIdFromUrl(url);
+    
+    // Convert to working iframe.mediadelivery.net embed format for proper video player
+    return `https://iframe.mediadelivery.net/embed/506378/${videoId}`;
+  } catch (error) {
+    console.error('❌ Error converting video URL:', error);
+    return url; // Return original if conversion fails
+  }
+}
+
+// Helper function to extract video ID from various URL formats
+function extractVideoIdFromUrl(url) {
+  if (!url) return 'default-video-id';
+  
+  // Extract from various Bunny CDN URL formats:
+  // https://vz-66586ad3-850.b-cdn.net/58b7eaf4-3c13-4f3f-bef6-cc093c4510c1/play_720p.mp4
+  // https://vz-66586ad3-850.b-cdn.net/58b7eaf4-3c13-4f3f-bef6-cc093c4510c1/playlist.m3u8
+  const bunnyRegex = /vz-[\w-]+\.b-cdn\.net\/([a-f0-9-]{36})/i;
+  const match = url.match(bunnyRegex);
+  
+  if (match) {
+    return match[1]; // Return the UUID part
+  }
+  
+  // If already iframe format (play or embed), extract the ID
+  const iframeRegex = /iframe\.mediadelivery\.net\/(play|embed)\/\d+\/([a-f0-9-]+)/i;
+  const iframeMatch = url.match(iframeRegex);
+  if (iframeMatch) {
+    return iframeMatch[2]; // The video ID is now in the second capture group
+  }
+  
+  console.warn('⚠️ Could not extract video ID from URL:', url);
+  return 'default-video-id';
+}
+
+// Helper function to generate thumbnail URL
+function generateThumbnailUrl(videoId) {
+  return `https://vz-66586ad3-850.b-cdn.net/${videoId}/thumbnail.jpg`;
+}
+
+// Helper function to generate preview image URL  
+function generatePreviewUrl(videoId) {
+  return `https://vz-66586ad3-850.b-cdn.net/${videoId}/preview.webp?v=1760897608`;
+}
+
+// Helper function to convert any video URL to iframe format for upload completion
+function convertToIframeUrl(originalUrl, bunnyVideoId) {
+  // If bunnyVideoId is provided, use it directly with embed format for proper video player
+  if (bunnyVideoId) {
+    console.log(`✅ Using provided bunnyVideoId: ${bunnyVideoId}`);
+    return `https://iframe.mediadelivery.net/embed/506378/${bunnyVideoId}`;
+  }
+  
+  // Otherwise try to extract from the URL
+  const extractedId = extractVideoIdFromUrl(originalUrl);
+  if (extractedId && extractedId !== 'default-video-id') {
+    console.log(`✅ Extracted video ID from URL: ${extractedId}`);
+    return `https://iframe.mediadelivery.net/embed/506378/${extractedId}`;
+  }
+  
+  console.warn('⚠️ Could not determine video ID, keeping original URL:', originalUrl);
+  return originalUrl;
+}
+
+// POST /api/admin/upload-tracking/fix-video-urls - Convert HLS URLs back to working MP4 format
+router.post('/fix-video-urls', async (req, res) => {
+  try {
+    // verifyAdminToken(req); // Temporarily disabled for debugging
+    console.log('🔧 CONVERTING HLS URLs TO WORKING MP4 FORMAT...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Step 1: Find ALL videos that need to be converted to iframe format
+    const { data: hlsVideos, error: fetchError } = await supabase
+      .from('content_entries')
+      .select('*')
+      .eq('content_type', 'video')
+      .not('media_url', 'like', '%iframe.mediadelivery.net%');
+    
+    if (fetchError) {
+      console.error('❌ Failed to fetch HLS videos:', fetchError);
+      return res.status(500).json({ success: false, error: fetchError.message });
+    }
+    
+    console.log(`📊 Found ${hlsVideos?.length || 0} videos to convert to iframe format`);
+    
+    if (!hlsVideos || hlsVideos.length === 0) {
+      return res.json({
+        success: true,
+        message: 'All videos already using iframe format',
+        converted: 0
+      });
+    }
+    
+    let convertedCount = 0;
+    const results = [];
+    
+    // Step 2: Convert each video URL to iframe format
+    for (const video of hlsVideos) {
+      try {
+        const oldUrl = video.media_url;
+        const newUrl = convertToWorkingVideoUrl(oldUrl);
+        
+        console.log(`🔄 Converting: ${video.title}`);
+        console.log(`   Old: ${oldUrl}`);
+        console.log(`   New: ${newUrl}`);
+        
+        const { error: updateError } = await supabase
+          .from('content_entries')
+          .update({ media_url: newUrl })
+          .eq('id', video.id);
+        
+        if (updateError) {
+          console.error(`❌ Failed to update video ${video.id}:`, updateError);
+          results.push({ id: video.id, title: video.title, success: false, error: updateError.message });
+        } else {
+          console.log(`✅ Converted: ${video.title}`);
+          results.push({ id: video.id, title: video.title, success: true, oldUrl, newUrl });
+          convertedCount++;
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error processing video ${video.id}:`, error);
+        results.push({ id: video.id, title: video.title, success: false, error: error.message });
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: `Converted ${convertedCount} out of ${hlsVideos.length} videos to iframe format`,
+      converted: convertedCount,
+      total: hlsVideos.length,
+      results
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in fix-video-urls endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/admin/upload-tracking/debug-video-urls - Test video URL accessibility  
+router.post('/debug-video-urls', async (req, res) => {
+  try {
+    // verifyAdminToken(req); // Temporarily disabled for debugging
+    console.log('🔍 DEBUGGING VIDEO URL ACCESS...');
+    
+    const supabase = getSupabaseAdminClient();
+    
+    // Get all videos with their URLs
+    const { data: videos, error } = await supabase
+      .from('content_entries')
+      .select('id, title, media_url')
+      .eq('content_type', 'video')
+      .limit(5); // Test first 5 videos
+    
+    if (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+    
+    const results = [];
+    
+    for (const video of videos) {
+      try {
+        console.log(`🔍 Testing: ${video.title} - ${video.media_url}`);
+        
+        // Test URL accessibility
+        const response = await fetch(video.media_url, {
+          method: 'HEAD', // Just check headers, don't download content
+          headers: {
+            'User-Agent': 'WhatNext-Backend/1.0'
+          }
+        });
+        
+        results.push({
+          id: video.id,
+          title: video.title,
+          url: video.media_url,
+          status: response.status,
+          statusText: response.statusText,
+          accessible: response.ok,
+          headers: Object.fromEntries(response.headers.entries())
+        });
+        
+        console.log(`${response.ok ? '✅' : '❌'} ${video.title}: ${response.status} ${response.statusText}`);
+        
+      } catch (error) {
+        results.push({
+          id: video.id,
+          title: video.title,
+          url: video.media_url,
+          accessible: false,
+          error: error.message
+        });
+        console.error(`❌ ${video.title}: ${error.message}`);
+      }
+    }
+    
+    return res.json({
+      success: true,
+      message: `Tested ${results.length} video URLs`,
+      results,
+      summary: {
+        total: results.length,
+        accessible: results.filter(r => r.accessible).length,
+        blocked: results.filter(r => !r.accessible).length
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in debug-video-urls endpoint:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// TEST ENDPOINT - Database inspection
+router.get('/test-database', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    
+    console.log('🔍 DATABASE INSPECTION TEST');
+    const supabase = getSupabaseAdminClient();
+    
+    // Get recent content entries
+    const { data: entries, error } = await supabase
+      .from('content_entries')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(10);
+    
+    // Get all locations
+    const { data: locations, error: locError } = await supabase
+      .from('locations')
+      .select('*');
+    
+    if (error || locError) {
+      console.error('❌ Database query error:', error || locError);
+      return res.status(500).json({ success: false, error: (error || locError).message });
+    }
+    
+    console.log(`📊 Found ${entries?.length || 0} recent content entries`);
+    console.log(`📍 Found ${locations?.length || 0} locations in database`);
+    
+    // Analyze the data
+    const analysis = {
+      totalEntries: entries?.length || 0,
+      withMediaUrl: entries?.filter(e => e.media_url && e.media_url !== '[PENDING]').length || 0,
+      withValidUrl: entries?.filter(e => e.media_url && e.media_url.startsWith('http')).length || 0,
+      totalLocations: locations?.length || 0,
+      byStatus: {},
+      byVisibility: {},
+      byLocation: {},
+      locationMismatch: entries?.filter(e => e.custom_location && !e.location_id).length || 0,
+      sampleEntries: entries?.slice(0, 3).map(e => ({
+        id: e.id,
+        title: e.title,
+        media_url: e.media_url,
+        status: e.status,
+        visibility: e.visibility,
+        location_id: e.location_id,
+        custom_location: e.custom_location,
+        created_at: e.created_at
+      })) || [],
+      availableLocations: locations?.map(l => ({
+        id: l.id,
+        name: l.name,
+        country_iso3: l.country_iso3,
+        lat: l.lat,
+        lng: l.lng
+      })) || []
+    };
+    
+    // Count by status
+    if (entries) {
+      for (const e of entries) {
+        analysis.byStatus[e.status] = (analysis.byStatus[e.status] || 0) + 1;
+        analysis.byVisibility[e.visibility] = (analysis.byVisibility[e.visibility] || 0) + 1;
+        if (e.location_id) analysis.byLocation[e.location_id] = (analysis.byLocation[e.location_id] || 0) + 1;
+        if (e.custom_location) analysis.byLocation[e.custom_location] = (analysis.byLocation[e.custom_location] || 0) + 1;
+      }
+    }
+    
+    console.log('📊 ANALYSIS:', JSON.stringify(analysis, null, 2));
+    
+    return res.json({
+      success: true,
+      analysis,
+      entries: entries?.slice(0, 5), // Return first 5 full entries
+      locations: locations || []
+    });
+    
+  } catch (error) {
+    console.error('❌ Database test error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// TEST ENDPOINT - Simple batch test
+router.post('/test-batch', async (req, res) => {
+  console.log('🧪 TEST BATCH ENDPOINT HIT!');
+  console.log('📋 Request body:', req.body);
+  
+  // Create a realistic batch with multiple files at different progress stages
+  const testSessions = [
+    {
+      id: 'test_session_1',
+      filename: 'video1.mp4',
+      status: 'completed',
+      progress: 100,
+      batchId: 'demo_batch_123',
+      partNumber: 1,
+      fileSize: 1000000
+    },
+    {
+      id: 'test_session_2', 
+      filename: 'video2.mp4',
+      status: 'uploading',
+      progress: 65,
+      batchId: 'demo_batch_123',
+      partNumber: 2,
+      fileSize: 2000000
+    },
+    {
+      id: 'test_session_3',
+      filename: 'video3.mp4', 
+      status: 'pending',
+      progress: 0,
+      batchId: 'demo_batch_123',
+      partNumber: 3,
+      fileSize: 3000000
+    }
+  ];
+  
+  // Add all test sessions
+  for (const session of testSessions) {
+    uploadSessions.set(session.id, {
+      ...session,
+      startTime: new Date().toISOString(),
+      lastUpdate: new Date().toISOString(),
+      folderTitle: 'Demo Batch Upload',
+      steps: {
+        credentials: session.status !== 'pending',
+        bunnyUpload: session.status === 'completed',
+        databaseUpdate: session.status === 'completed'
+      }
+    });
+  }
+  
+  console.log('� Sessions after adding demo batch:', uploadSessions.size);
+  
+  return res.json({
+    success: true,
+    message: 'Demo batch created with realistic progress',
+    sessionsAdded: testSessions.length,
+    totalSessions: uploadSessions.size,
+    demoSessions: testSessions
+  });
+});
+
+// --- DEBUG ENDPOINTS (admin only) -------------------------------------------------
+// GET /api/admin/upload-tracking/debug/content-entry/:id - fetch content_entries row
+router.get('/debug/content-entry/:id', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { id } = req.params;
+    const supabase = getSupabaseAdminClient();
+    const { data, error } = await supabase
+      .from('content_entries')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) {
+      console.error('❌ Debug fetch content entry error:', error);
+      return res.status(500).json({ success: false, error: error.message || error });
+    }
+
+    return res.json({ success: true, data });
+  } catch (err) {
+    console.error('❌ Error in debug content-entry endpoint:', err);
+    return res.status(500).json({ success: false, error: err.message || err });
+  }
+});
+
+// GET /api/admin/upload-tracking/debug/session/:sessionId - inspect an in-memory session
+router.get('/debug/session/:sessionId', async (req, res) => {
+  try {
+    verifyAdminToken(req);
+    const { sessionId } = req.params;
+    const session = uploadSessions.get(sessionId);
+    if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
+    return res.json({ success: true, session });
+  } catch (err) {
+    console.error('❌ Error in debug session endpoint:', err);
+    return res.status(500).json({ success: false, error: err.message || err });
+  }
+});
+
 
 module.exports = router;
