@@ -28,6 +28,7 @@ try {
   router.use('/populate-settings', require('./populate-settings.js'));
   router.use('/force-populate-settings', require('./force-populate-settings.js'));
   router.use('/dividend-trigger', require('./dividend-trigger.js'));
+  router.use('/dividend-config', require('./dividend-config.js'));
   
   console.log('✅ All admin routes loaded');
 } catch (error) {
@@ -50,7 +51,7 @@ router.get('/', (req, res) => {
     availableEndpoints: [
       '/login', '/dashboard', '/users', '/settings', '/analytics',
       '/content', '/media', '/upload', '/giveaway', '/claims', '/stats',
-      '/ecosystem', '/ecosystem/spend', '/dividend-trigger'
+      '/ecosystem', '/ecosystem/spend', '/dividend-trigger', '/dividend-config'
     ]
   });
 });
