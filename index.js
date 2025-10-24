@@ -13,34 +13,25 @@ const PORT = process.env.PORT || 3000;
 app.use(cors({
   origin: true, // Allow all origins for debugging
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], 
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Cache-Control', 'Pragma', 'Expires']
 }));
 
 // UPLOAD ROUTE - MOUNTED FIRST TO BYPASS ALL MIDDLEWARE
-app.use('/api/admin/upload', (req, res, next) => {
-  console.log('🔥🔥🔥 UPLOAD ROUTE HIT FIRST - BYPASSING ALL MIDDLEWARE 🔥🔥🔥');
-  console.log('📋 Method:', req.method);
-  console.log('📋 URL:', req.url);
-  console.log('📋 Content-Type:', req.headers['content-type']);
-  next();
-}, require('./api/admin/upload.js'));
+app.use('/api/admin/upload', require('./api/admin/upload.js'));
 
 // Middleware - EXCLUDE upload routes from JSON parsing (except credentials and upload-tracking)
 app.use((req, res, next) => {
   // Allow JSON parsing for credentials endpoint
   if (req.path.includes('/upload/credentials')) {
-    console.log('✅ Allowing JSON parsing for credentials endpoint:', req.path);
     return express.json({ limit: '50gb' })(req, res, next);
   }
   // Allow JSON parsing for upload-tracking endpoints (they handle JSON, not files)
   if (req.path.includes('/upload-tracking')) {
-    console.log('✅ Allowing JSON parsing for upload-tracking endpoint:', req.path);
     return express.json({ limit: '50gb' })(req, res, next);
   }
   // Skip JSON parsing for file upload routes only
   if (req.path.includes('/upload') || req.url.includes('/upload')) {
-    console.log('🚫 Skipping JSON parsing for upload route:', req.path, req.url);
     return next();
   }
   // Apply JSON parsing to all other routes
@@ -50,17 +41,14 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   // Allow URL encoding for credentials endpoint
   if (req.path.includes('/upload/credentials')) {
-    console.log('✅ Allowing URL encoding for credentials endpoint:', req.path);
     return express.urlencoded({ extended: true, limit: '50gb' })(req, res, next);
   }
   // Allow URL encoding for upload-tracking endpoints (they handle JSON, not files)
   if (req.path.includes('/upload-tracking')) {
-    console.log('✅ Allowing URL encoding for upload-tracking endpoint:', req.path);
     return express.urlencoded({ extended: true, limit: '50gb' })(req, res, next);
   }
   // Skip URL encoding for file upload routes only
   if (req.path.includes('/upload') || req.url.includes('/upload')) {
-    console.log('🚫 Skipping URL encoding for upload route:', req.path, req.url);
     return next();
   }
   // Apply URL encoding to all other routes
@@ -89,29 +77,20 @@ app.get('/health', (req, res) => {
 // Helper function to load a single route
 const loadRoute = (route, loadedRoutes, routeType = '') => {
   try {
-    console.log(`🔄 Attempting to load ${routeType}route: ${route.path} from ${route.file}`);
-    
-    // Check if file exists before requiring
+    // Silent route loading - only log failures
     const fs = require('node:fs');
     const path = require('node:path');
     const fullPath = path.resolve(route.file);
-    console.log(`📁 Checking file path: ${fullPath}`);
     
     if (fs.existsSync(fullPath)) {
-      console.log(`✅ File exists, requiring...`);
       const router = require(route.file);
-      console.log(`✅ Successfully required router module`);
       
       if (router) {
-        console.log(`📋 Router type: ${typeof router}`);
-        console.log(`📋 Router has stack: ${!!router.stack}`);
-        
         app.use(route.path, router);
         loadedRoutes.count++;
-        console.log(`✅ Successfully loaded ${routeType}route: ${route.path}`);
         return true;
       } else {
-        console.log(`❌ Router is null/undefined`);
+        console.log(`❌ Router is null/undefined: ${route.path}`);
         return false;
       }
     } else {
@@ -120,9 +99,6 @@ const loadRoute = (route, loadedRoutes, routeType = '') => {
     }
   } catch (error) {
     console.log(`❌ FAILED to load ${routeType}route ${route.path}:`, error.message);
-    console.log(`   File: ${route.file}`);
-    console.log(`   Error type: ${error.constructor.name}`);
-    console.log(`   Stack:`, error.stack);
     return false;
   }
 };
@@ -240,32 +216,20 @@ const mountRoutes = () => {
     const loadedRoutes = { count: 0 };
     const { workingRoutes, originalRoutes } = getRouteDefinitions();
     
-    console.log(`🚀 Starting route mounting process...`);
-    console.log(`📋 Working routes to load: ${workingRoutes.length}`);
-    console.log(`📋 Original routes to load: ${originalRoutes.length}`);
-    
-    // Load working routes first
-    console.log(`🔄 Loading working routes...`);
+    // Load working routes first (silent)
     loadRoutesArray(workingRoutes, loadedRoutes, 'working ');
     
-    // Load original routes
-    console.log(`🔄 Loading original routes...`);
+    // Load original routes (silent)
     loadRoutesArray(originalRoutes, loadedRoutes, 'original ');
 
-    console.log(`✅ Successfully loaded ${loadedRoutes.count} API routes`);
+    console.log(`✅ Loaded ${loadedRoutes.count} API routes`);
     
-    // CRITICAL: Force load dividends router and fail if it doesn't work
-    console.log(`🔍 FORCE LOADING dividends route...`);
+    // Verify critical dividends router
     const dividendsRoute = { path: '/api/dividends', file: './api/dividends.js' };
     const dividendsLoaded = loadRoute(dividendsRoute, loadedRoutes, 'CRITICAL ');
     
     if (dividendsLoaded === false) {
-      console.error(`🚨🚨🚨 CRITICAL ERROR: Dividends router failed to load! 🚨🚨🚨`);
-      console.error(`   This will cause the frontend to show no dividend data`);
-      console.error(`   Check the dividends.js file and its dependencies`);
-      // Don't throw error - let server start but log the critical issue
-    } else {
-      console.log(`✅ Dividends router loaded successfully`);
+      console.error(`🚨 CRITICAL: Dividends router failed to load!`);
     }
     
   } catch (error) {
@@ -287,7 +251,6 @@ app.get('/api/test-dividends', (req, res) => {
 
 // Serve static files from the React build
 const frontendPath = path.join(__dirname, '..', '..', 'dist');
-console.log(`📁 Serving static files from: ${frontendPath}`);
 app.use(express.static(frontendPath));
 
 // Serve React app for all non-API routes (SPA fallback)
@@ -297,9 +260,8 @@ app.get('*', (req, res, next) => {
     return next();
   }
   
-  // Serve React app
+  // Serve React app (silent)
   const indexPath = path.join(frontendPath, 'index.html');
-  console.log(`🎯 Serving React app: ${req.path} -> ${indexPath}`);
   res.sendFile(indexPath, (err) => {
     if (err) {
       console.error(`❌ Error serving React app:`, err);
