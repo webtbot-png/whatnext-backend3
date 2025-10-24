@@ -1,5 +1,6 @@
 const { Connection, PublicKey, Transaction, sendAndConfirmTransaction, Keypair } = require('@solana/web3.js');
 const { getSupabaseAdminClient } = require('../../database.js');
+const { getEligibleHolders, createHolderSnapshot, calculateProportionalDistribution } = require('./holder-loyalty.js');
 const crypto = require('node:crypto');
 
 // Solana connection
@@ -255,34 +256,63 @@ async function updateHolderStats(holders, claimId, distributionAmount) {
 }
 
 /**
- * Create dividend distributions
+ * Create dividend distributions for eligible holders only
  */
-async function createDividendDistributions(claimId, holders, distributionAmount) {
+async function createDividendDistributionsForEligible(claimId, distributions) {
   const supabase = getSupabaseAdminClient();
   
-  const distributions = holders.map(holder => {
-    const dividendAmount = (distributionAmount * holder.percentage) / 100;
-    
-    return {
-      claim_id: claimId,
-      holder_address: holder.address,
-      token_balance: holder.balance,
-      percentage: holder.percentage,
-      dividend_amount: dividendAmount,
-      status: 'pending'
-    };
-  });
+  const distributionRecords = distributions.map(dist => ({
+    claim_id: claimId,
+    holder_address: dist.holder_address,
+    token_balance: dist.token_balance,
+    percentage: dist.share_percentage,
+    dividend_amount: dist.dividend_amount,
+    status: 'pending'
+  }));
   
   const { error } = await supabase
     .from('dividend_distributions')
-    .insert(distributions);
+    .insert(distributionRecords);
     
   if (error) {
     throw new Error('Failed to create dividend distributions: ' + error.message);
   }
   
-  console.log(`✅ Created ${distributions.length} dividend distributions`);
-  return distributions;
+  console.log(`✅ Created ${distributionRecords.length} dividend distributions for ELIGIBLE HOLDERS ONLY`);
+  return distributionRecords;
+}
+
+/**
+ * Update holder stats for eligible holders only
+ */
+async function updateHolderStatsForEligible(eligibleHolders, claimId, distributionAmount) {
+  const supabase = getSupabaseAdminClient();
+  
+  for (const holder of eligibleHolders) {
+    const totalEligibleTokens = eligibleHolders.reduce((sum, h) => sum + h.balance, 0);
+    const sharePercentage = totalEligibleTokens > 0 ? (holder.balance / totalEligibleTokens) * 100 : 0;
+    const dividendAmount = (distributionAmount * sharePercentage) / 100;
+    
+    // Upsert holder stats
+    const { error } = await supabase
+      .from('holder_stats')
+      .upsert({
+        holder_address: holder.address,
+        current_token_balance: holder.balance,
+        current_percentage: holder.percentage,
+        pending_dividends: dividendAmount,
+        total_claims_participated: 1, // This should be incremented
+        last_dividend_date: new Date().toISOString()
+      }, {
+        onConflict: 'holder_address'
+      });
+      
+    if (error) {
+      console.error(`❌ Error updating stats for eligible holder ${holder.address}:`, error);
+    }
+  }
+  
+  console.log(`✅ Updated stats for ${eligibleHolders.length} ELIGIBLE HOLDERS`);
 }
 
 /**
@@ -310,7 +340,7 @@ function shouldProcessClaim(settings, forceRun) {
 }
 
 /**
- * Process successful fee claim and create distributions
+ * Process successful fee claim and create distributions for ELIGIBLE HOLDERS ONLY
  */
 async function processSuccessfulClaim(settings, claimResult, supabase, now) {
   // Calculate distribution amount
@@ -319,8 +349,18 @@ async function processSuccessfulClaim(settings, claimResult, supabase, now) {
   console.log(`💰 Claimed: ${claimResult.claimedAmount} SOL`);
   console.log(`📊 Distribution (${settings.distribution_percentage}%): ${distributionAmount} SOL`);
 
-  // Get current token holders
-  const holderData = await getTokenHolders(settings.token_mint_address);
+  // Get current token holders from blockchain
+  const allHolderData = await getTokenHolders(settings.token_mint_address);
+  console.log(`🔍 Found ${allHolderData.holders.length} total holders on blockchain`);
+
+  // Filter to only eligible holders (70%+ retention rule)
+  const eligibleHolders = await getEligibleHolders(allHolderData.holders, settings.token_mint_address);
+  console.log(`✅ Eligible holders: ${eligibleHolders.length}/${allHolderData.holders.length}`);
+
+  if (eligibleHolders.length === 0) {
+    console.warn('⚠️ No eligible holders found for dividend distribution');
+    throw new Error('No eligible holders found for dividend distribution');
+  }
 
   // Create claim record
   const { data: claimRecord, error: claimError } = await supabase
@@ -329,8 +369,8 @@ async function processSuccessfulClaim(settings, claimResult, supabase, now) {
       claimed_amount: claimResult.claimedAmount,
       transaction_id: claimResult.transactionId,
       distribution_amount: distributionAmount,
-      total_supply: holderData.totalSupply,
-      holder_count: holderData.holders.length,
+      total_supply: allHolderData.totalSupply,
+      holder_count: eligibleHolders.length, // Only count eligible holders
       status: 'processing'
     })
     .select()
@@ -344,14 +384,17 @@ async function processSuccessfulClaim(settings, claimResult, supabase, now) {
   console.log(`✅ Created claim record: ${claimId}`);
 
   try {
-    // Save holder snapshot
-    await saveHolderSnapshot(claimId, holderData.holders);
+    // Create snapshot of eligible holders for audit trail
+    await createHolderSnapshot(claimId, eligibleHolders);
 
-    // Create dividend distributions
-    await createDividendDistributions(claimId, holderData.holders, distributionAmount);
+    // Calculate proportional distribution among eligible holders only
+    const distributions = calculateProportionalDistribution(eligibleHolders, distributionAmount);
 
-    // Update holder stats
-    await updateHolderStats(holderData.holders, claimId, distributionAmount);
+    // Create dividend distributions for eligible holders only
+    await createDividendDistributionsForEligible(claimId, distributions);
+
+    // Update holder stats for eligible holders only
+    await updateHolderStatsForEligible(eligibleHolders, claimId, distributionAmount);
 
     // Update claim status to completed
     await supabase
@@ -370,6 +413,7 @@ async function processSuccessfulClaim(settings, claimResult, supabase, now) {
       .eq('id', settings.id);
 
     console.log(`✅ Dividend claim process completed successfully`);
+    console.log(`💎 Distributed to ${eligibleHolders.length} ELIGIBLE HOLDERS ONLY (70%+ retention)`);
     console.log(`⏰ Next claim scheduled for: ${nextClaim.toISOString()}`);
 
     return {
@@ -377,7 +421,8 @@ async function processSuccessfulClaim(settings, claimResult, supabase, now) {
       claimId,
       claimedAmount: claimResult.claimedAmount,
       distributionAmount,
-      holdersCount: holderData.holders.length,
+      totalHolders: allHolderData.holders.length,
+      eligibleHolders: eligibleHolders.length,
       transactionId: claimResult.transactionId,
       nextClaimTime: nextClaim.toISOString()
     };
