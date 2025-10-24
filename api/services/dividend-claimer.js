@@ -41,7 +41,8 @@ async function getAutoClaimSettings() {
     
   if (error) {
     if (error.code === 'PGRST116') { // Not found
-      // Create default settings
+      console.log('⚠️ No auto-claim settings found. Creating minimal default settings...');
+      // Return default settings without trying to insert (database may have constraints)
       const defaultSettings = {
         enabled: false,
         claim_interval_minutes: 10,
@@ -52,18 +53,8 @@ async function getAutoClaimSettings() {
         token_mint_address: null
       };
       
-      const { data: newData, error: createError } = await supabase
-        .from('auto_claim_settings')
-        .insert(defaultSettings)
-        .select()
-        .single();
-        
-      if (createError) {
-        console.error('❌ Failed to create default auto-claim settings:', createError);
-        return defaultSettings;
-      }
-      
-      return newData;
+      console.warn('💡 To configure the dividend system, use the admin configuration endpoint.');
+      return defaultSettings;
     }
     
     console.error('❌ Error fetching auto-claim settings:', error);
