@@ -138,6 +138,13 @@ async function checkPumpFunFees(feeAccountAddress) {
   try {
     console.log('💰 Checking PumpFun fee account balance:', feeAccountAddress);
     
+    // Validate fee account address format
+    if (!feeAccountAddress || 
+        feeAccountAddress === 'PLACEHOLDER_PUMPFUN_FEE_ACCOUNT' ||
+        feeAccountAddress.length !== 44) {
+      throw new Error('Invalid or unconfigured PumpFun fee account address');
+    }
+    
     const feeAccount = new PublicKey(feeAccountAddress);
     const balance = await connection.getBalance(feeAccount);
     const solBalance = balance / 1000000000; // Convert lamports to SOL
@@ -160,6 +167,20 @@ async function checkPumpFunFees(feeAccountAddress) {
 async function claimPumpFunFees(settings) {
   try {
     console.log('🎯 Starting PumpFun creator fee claim process...');
+    
+    // Check if PumpFun fee account is configured
+    if (!settings.pumpfun_fee_account || 
+        settings.pumpfun_fee_account === 'PLACEHOLDER_PUMPFUN_FEE_ACCOUNT') {
+      console.log('⚠️ PumpFun fee account not configured - skipping fee claim');
+      console.log('💡 To enable fee claiming, configure pumpfun_fee_account in auto_claim_settings');
+      return {
+        success: true,
+        reason: 'PumpFun fee account not configured - skipped fee claiming',
+        balance: 0,
+        claimedAmount: 0,
+        source: 'pumpfun-skipped'
+      };
+    }
     
     // Check fee balance first
     const feeInfo = await checkPumpFunFees(settings.pumpfun_fee_account);
