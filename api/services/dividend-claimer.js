@@ -12,7 +12,7 @@ const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
  */
 function decryptPrivateKey(encryptedKey, encryptionPassword) {
   try {
-    const algorithm = 'aes-256-gcm'; 
+    const algorithm = 'aes-256-gcm';
     const [encrypted, , tag] = encryptedKey.split(':');
     
     const decipher = crypto.createDecipherGCM(algorithm, Buffer.from(encryptionPassword, 'hex'));
@@ -172,59 +172,95 @@ async function checkPumpFunFees(feeAccountAddress) {
 
 /**
  * Claim fees from PumpFun using official collectCreatorFee instruction
+ * Enhanced version with real PumpPortal integration
  */
 async function claimPumpFunFees(settings) {
   try {
-    console.log('🎯 Starting PumpFun creator fee claim process...');
+    console.log('🎯 Starting enhanced PumpFun creator fee claim process...');
     
-    // Check if PumpFun fee account is configured
-    if (!settings.pumpfun_fee_account || 
-        settings.pumpfun_fee_account === 'PLACEHOLDER_PUMPFUN_FEE_ACCOUNT') {
-      console.log('⚠️ PumpFun fee account not configured - skipping fee claim');
-      console.log('💡 To enable fee claiming, configure pumpfun_fee_account in auto_claim_settings');
+    // Import the new creator fee claiming function
+    const { claimPumpFunFeesEnhanced, isCreatorFeeClaimingAvailable } = require('../../lib/creator-fee-claimer.js');
+    
+    // Check if creator fee claiming is available
+    const isAvailable = await isCreatorFeeClaimingAvailable();
+    
+    if (!isAvailable) {
+      console.log('⚠️ Creator fee claiming not configured - using fallback');
+      console.log('💡 Configure AWS secrets to enable real PumpFun fee claiming');
+      
+      // Fallback to original logic for backward compatibility
+      if (!settings.pumpfun_fee_account || 
+          settings.pumpfun_fee_account === 'PLACEHOLDER_PUMPFUN_FEE_ACCOUNT') {
+        return {
+          success: true,
+          reason: 'PumpFun fee account not configured - skipped fee claiming',
+          claimedAmount: 0,
+          source: 'pumpfun-skipped'
+        };
+      }
+      
+      // Check fee balance with fallback
+      try {
+        const feeInfo = await checkPumpFunFees(settings.pumpfun_fee_account);
+        
+        if (feeInfo.balance < settings.min_claim_amount) {
+          return {
+            success: false,
+            reason: 'Below minimum claim amount',
+            balance: feeInfo.balance,
+            minAmount: settings.min_claim_amount
+          };
+        }
+        
+        return {
+          success: true,
+          claimedAmount: 0,
+          reason: 'PumpFun system ready - using fallback mode',
+          feeAccountBalance: feeInfo.balance,
+          status: 'fallback'
+        };
+      } catch (balanceError) {
+        console.log('⚠️ Could not check fee balance, proceeding with enhanced claim:', balanceError.message);
+        // Continue execution - this is expected when fee account is not configured
+      }
+    }
+    
+    // Use the enhanced creator fee claiming
+    console.log('🚀 Using enhanced PumpPortal integration for creator fee claiming');
+    const claimResult = await claimPumpFunFeesEnhanced(settings);
+    
+    if (claimResult.success) {
+      console.log('✅ Enhanced creator fee claim successful!');
+      console.log(`💰 Transaction: ${claimResult.transactionId || 'N/A'}`);
+      console.log(`🌐 Explorer: ${claimResult.explorerUrl || 'N/A'}`);
+      
       return {
         success: true,
-        reason: 'PumpFun fee account not configured - skipped fee claiming',
-        balance: 0,
-        claimedAmount: 0,
-        source: 'pumpfun-skipped'
+        claimedAmount: claimResult.claimedAmount || 0,
+        transactionId: claimResult.transactionId,
+        explorerUrl: claimResult.explorerUrl,
+        source: 'pumpfun-enhanced',
+        signature: claimResult.signature,
+        timestamp: claimResult.timestamp
       };
-    }
-    
-    // Check fee balance first
-    const feeInfo = await checkPumpFunFees(settings.pumpfun_fee_account);
-    
-    if (feeInfo.balance < settings.min_claim_amount) {
-      console.log(`⏭️ Fee balance (${feeInfo.balance} SOL) below minimum claim amount (${settings.min_claim_amount} SOL)`);
+    } else {
+      console.log('❌ Enhanced creator fee claim failed:', claimResult.reason);
       return {
         success: false,
-        reason: 'Below minimum claim amount',
-        balance: feeInfo.balance,
-        minAmount: settings.min_claim_amount
+        reason: claimResult.reason || 'Enhanced claim failed',
+        claimedAmount: 0,
+        error: claimResult.error
       };
     }
-      
-    console.log('ℹ️ PumpFun creator fee claiming system ready');
-    console.log('ℹ️ Note: Full Solana blockchain integration available but requires contract setup');
-    
-    // For now, return a success status indicating the system is ready
-    // When a PumpFun contract is configured, this will execute real claims
-    return {
-      success: true,
-      claimedAmount: 0,
-      reason: 'PumpFun system ready - no contract configured yet',
-      feeAccountBalance: feeInfo.balance,
-      status: 'ready'
-    };
     
   } catch (error) {
-    console.error('❌ Error claiming PumpFun fees:', error);
+    console.error('❌ Error in enhanced PumpFun fee claiming:', error);
     
-    // If real claim fails, don't throw - return failure result so dividend system continues
+    // Return failure result so dividend system can continue
     return {
       success: false,
-      reason: 'PumpFun claim failed: ' + error.message,
-      balance: 0,
+      reason: 'Enhanced PumpFun claim failed: ' + error.message,
+      claimedAmount: 0,
       error: error.message
     };
   }
