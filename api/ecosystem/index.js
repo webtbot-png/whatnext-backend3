@@ -4,6 +4,7 @@ const spendRouter = require('./spend');
 const feesRouter = require('./fees');
 const pumpfunFeesRouter = require('./pumpfun-fees');
 const walletRouter = require('./wallet');
+const solPriceRouter = require('./sol-price');
 
 const router = express.Router();
 
@@ -13,6 +14,7 @@ router.use('/spend', spendRouter);
 router.use('/fees', feesRouter);
 router.use('/pumpfun-fees', pumpfunFeesRouter);
 router.use('/wallet', walletRouter);
+router.use('/sol-price', solPriceRouter);
 
 // NOTE: Admin ecosystem routes are handled separately at /api/admin/ecosystem/*
 // No need for proxy routes here to avoid conflicts
