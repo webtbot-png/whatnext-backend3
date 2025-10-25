@@ -12,7 +12,7 @@ const connection = new Connection(SOLANA_RPC_URL, 'confirmed');
  */
 function decryptPrivateKey(encryptedKey, encryptionPassword) {
   try {
-    const algorithm = 'aes-256-gcm';
+    const algorithm = 'aes-256-gcm'; 
     const [encrypted, , tag] = encryptedKey.split(':');
     
     const decipher = crypto.createDecipherGCM(algorithm, Buffer.from(encryptionPassword, 'hex'));
