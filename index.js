@@ -151,6 +151,7 @@ const getRouteDefinitions = () => {
     { path: '/api/admin/api-config', file: './api/admin/api-config.js' },
     { path: '/api/admin/claims', file: './api/admin/claims.js' },
     { path: '/api/admin/content', file: './api/admin/content.js' },
+    { path: '/api/admin/creator-fees', file: './api/admin/creator-fees.js' },
     { path: '/api/admin/dashboard', file: './api/admin/dashboard.js' },
     { path: '/api/admin/force-populate-settings', file: './api/admin/force-populate-settings.js' },
     { path: '/api/admin/giveaway', file: './api/admin/giveaway.js' },
