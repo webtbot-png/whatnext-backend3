@@ -101,7 +101,7 @@ router.put('/task/:taskId', async (req, res) => {
     const { taskId } = req.params;
     const { completed, isCompleted } = req.body;
     const supabase = getSupabaseAdminClient();
-    const completionStatus = completed !== undefined ? completed : isCompleted;
+    const completionStatus = completed === undefined ? isCompleted : completed;
     console.log(`?? Express roadmap: Updating task ${taskId} completion to ${completionStatus}`);
     const { data, error } = await supabase
       .from('roadmap_tasks')
