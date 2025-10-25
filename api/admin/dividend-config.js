@@ -1,5 +1,5 @@
 const express = require('express');
-const { getSupabaseAdminClient } = require('../lib/supabase');
+const { getSupabaseAdminClient } = require('../../database.js');
 
 const router = express.Router();
 
