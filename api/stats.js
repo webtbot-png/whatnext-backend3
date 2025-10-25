@@ -38,19 +38,19 @@ router.get('/', async (req, res) => {
     // Convert array to object
     const stats = {};
     if (statsData) {
-      statsData.forEach(item => {
+      for (const item of statsData) {
         stats[item.key] = item.value;
-      });
+      }
     }
     return res.json({
       success: true,
       data: {
-        totalMembers: parseInt(stats['community_members'] || '0'),
-        activeStreams: parseInt(stats['active_streams'] || '1'),
+        totalMembers: Number.parseInt(stats['community_members'] || '0'),
+        activeStreams: Number.parseInt(stats['active_streams'] || '1'),
         locationsVisited: visitedLocations || 0,
         totalLocations: totalLocations || 0,
-        viewsLast7d: parseInt(stats['views_last_7d'] || '0'),
-        viewsLast30d: parseInt(stats['views_last_30d'] || '0'),
+        viewsLast7d: Number.parseInt(stats['views_last_7d'] || '0'),
+        viewsLast30d: Number.parseInt(stats['views_last_30d'] || '0'),
         liveStatus: stats['live_status'] || 'OFFLINE',
         lastUpdated: new Date().toISOString()
       }
@@ -94,15 +94,15 @@ router.get('/live', async (req, res) => {
     // Convert array to object
     const liveStatsObj = {};
     if (liveStats) {
-      liveStats.forEach(item => {
+      for (const item of liveStats) {
         liveStatsObj[item.key] = item.value;
-      });
+      }
     }
     return res.json({
       success: true,
       live: {
         status: liveStatsObj['live_status'] || 'OFFLINE',
-        currentViewers: parseInt(liveStatsObj['current_viewers'] || '0'),
+        currentViewers: Number.parseInt(liveStatsObj['current_viewers'] || '0'),
         location: liveStatsObj['live_location'] || null,
         streamUrl: liveStatsObj['live_stream_url'] || null,
         activeUsers: recentActivity?.length || 0,
